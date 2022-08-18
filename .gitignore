@@ -1,0 +1,15 @@
+# python bytecode
+__pycache__
+*.py[cod]
+
+# other binaries
+*.a
+*.o
+*.so
+*.mo
+
+# editor
+*~
+*.swp
+\#*.*\#
+
