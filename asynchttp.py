@@ -40,6 +40,7 @@ class HttpResponse(object):
         self.httpVersion = httpVersion or request.httpVersion
         self.statusCode = statusCode
         self.statusText = statusText
+        self.headers = {}
 
     def __repr__(self):
         return '<%s(%s)>' % (self.__class__.__name__, ', '.join([
