@@ -77,7 +77,7 @@ class HttpServer(TcpServer):
             log.exception('caught exception while handling http request %r: %s', request, e)
         finally:
             if response is None:
-                response = HttpResponse(request, 500, 'Internal Server Error')
+                response = HttpResponse(request, statusCode=500, statusText='Internal Server Error')
             log.verbose('sending http response: %r', response)
             self._SendHttpResponse(connection, request, response)
         return True # handled one request, try next one
