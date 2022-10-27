@@ -9,7 +9,6 @@ A python package that provides async implementation of common network server and
 ## Example
 
 ```python
-
 # create one context to manage all socket activities
 ctx = TcpContext()
 
@@ -30,3 +29,4 @@ while True:
     ctx.SpinOnce(0.05)
     # do other things
     pass
+```
