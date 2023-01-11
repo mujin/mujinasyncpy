@@ -1,6 +1,6 @@
 # Mujin Async Networking Library
 
-![Build status](https://github.com/mujin/mujinasyncpy/actions/workflows/python.yml/badge.svg)
+[![Build status](https://github.com/mujin/mujinasyncpy/actions/workflows/python.yml/badge.svg)](https://github.com/mujin/mujinasyncpy/actions/workflows/python.yml)
 
 
 A python package that provides async implementation of common network server and client:
