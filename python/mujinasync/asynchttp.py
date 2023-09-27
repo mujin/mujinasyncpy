@@ -199,8 +199,8 @@ class HttpClient(TcpClient):
         self._HandleHttpResponse(connection, response)
         return True # handled one request, try next one
 
-    def _HandleHttpResponse(self, connection, request):
-        return self._CallApi('HandleHttpResponse', request=request, connection=connection, client=self)
+    def _HandleHttpResponse(self, connection, response):
+        return self._CallApi('HandleHttpResponse', response=response, connection=connection, client=self)
 
     def _TryReceiveHttpResponse(self, connection):
         bufferData = connection.receiveBuffer.readView.tobytes()
