@@ -306,6 +306,7 @@ class TcpContext(object):
         # connect for client
         for client in self._clients:
             if not client._connections:
+                clientSocket = None
                 try:
                     clientSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     clientSocket.connect(client._endpoint)
@@ -314,7 +315,9 @@ class TcpContext(object):
                         clientSocket = client._sslContext.wrap_socket(clientSocket, server_side=False)
                     clientSocket.setblocking(0) # TODO: deferred non-blocking after connect finishes, not ideal
                 except Exception as e:
-                    log.exception('error while trying to create client connection: %s', e)
+                    if clientSocket:
+                        clientSocket.close()
+                    log.exception('error while trying to create client connection to %s: %s', client._endpoint, e)
                     continue
                 connection = client._connectionClass(connectionSocket=clientSocket, remoteAddress=client._endpoint)
                 client._connections.append(connection)
