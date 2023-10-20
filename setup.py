@@ -14,7 +14,7 @@ setup(
     name='mujinasync',
     version=version['__version__'],
     packages=['mujinasync'],
-    build_types=['mujinasync'],
+    typestubs=['mujinasync'],
     package_dir={'mujinasync': 'python/mujinasync'},
     locale_dir='locale',
     license='Apache License, Version 2.0',
