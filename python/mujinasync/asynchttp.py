@@ -34,6 +34,7 @@ class HttpResponse(object):
 
     headers = None
     body = None
+    cookies = None
 
     def __init__(self, request, httpVersion=None, statusCode=200, statusText='OK'):
         self.request = request
@@ -41,11 +42,12 @@ class HttpResponse(object):
         self.statusCode = statusCode
         self.statusText = statusText
         self.headers = {}
+        self.cookies = []
 
     def __repr__(self):
         return '<%s(%s)>' % (self.__class__.__name__, ', '.join([
             ('%s=%r' % (key, getattr(self, key)))
-            for key in ('statusCode', 'statusText', 'request')
+            for key in ('statusCode', 'statusText', 'request', 'cookies')
         ]))
 
 
@@ -148,7 +150,11 @@ class HttpServer(TcpServer):
         header = bytearray()
         header += ('%s %d %s\r\n' % (response.httpVersion.upper(), response.statusCode, response.statusText)).encode('utf-8')
         for name, value in headers.items():
-            header += ('%s: %s\r\n' % (name, value)).encode('utf-8')
+            if type(value) == list:
+                for item in value:
+                    header += ('%s: %s\r\n' % (name, item)).encode('utf-8')
+            else:
+                header += ('%s: %s\r\n' % (name, value)).encode('utf-8')
         header += b'\r\n'
 
         totalLength = len(header)
@@ -199,8 +205,8 @@ class HttpClient(TcpClient):
         self._HandleHttpResponse(connection, response)
         return True # handled one request, try next one
 
-    def _HandleHttpResponse(self, connection, request):
-        return self._CallApi('HandleHttpResponse', request=request, connection=connection, client=self)
+    def _HandleHttpResponse(self, connection, response):
+        return self._CallApi('HandleHttpResponse', response=response, connection=connection, client=self)
 
     def _TryReceiveHttpResponse(self, connection):
         bufferData = connection.receiveBuffer.readView.tobytes()
@@ -222,10 +228,14 @@ class HttpClient(TcpClient):
         statusCode = int(parts[1])
         statusText = ' '.join(parts[2:])
 
+        cookies = []
         headers = {}
         for line in lines[1:]:
             name, value = line.split(':', 1)
             headers[name.lower().strip()] = value.strip()
+            # TODO: we don't want to break compatibility of other ITLs, make headers dict[str, list[str]] later
+            if name.lower().strip() == 'set-cookies':
+                cookies.append(value.strip())
 
         body = None
         if 'content-length' in headers:
@@ -238,6 +248,7 @@ class HttpClient(TcpClient):
         request = self._inflightRequests[connection].pop(0)
         response = HttpResponse(request=request, httpVersion=httpVersion, statusCode=statusCode, statusText=statusText)
         response.headers = headers
+        response.cookies = cookies
         response.body = body
         request.response = response
 
