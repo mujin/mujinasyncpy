@@ -2,8 +2,10 @@
 
 from .asynctcp import TcpServer, TcpConnection, TcpClient
 
+import ssl
 import logging
 log = logging.getLogger(__name__)
+
 
 
 class HttpConnection(TcpConnection):

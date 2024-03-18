@@ -310,8 +310,9 @@ class TcpContext(object):
                     clientSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     clientSocket.connect(client._endpoint)
                     log.debug('new connection to %s', client._endpoint)
-                    if client._sslContext is not None:
-                        clientSocket = client._sslContext.wrap_socket(clientSocket, server_side=False)
+                    if client._sslContext is None:
+                        client._sslContext = ssl.create_default_context()
+                    clientSocket = client._sslContext.wrap_socket(clientSocket, server_side=False)
                     clientSocket.setblocking(0) # TODO: deferred non-blocking after connect finishes, not ideal
                 except Exception as e:
                     log.exception('error while trying to create client connection: %s', e)
