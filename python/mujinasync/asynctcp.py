@@ -328,8 +328,9 @@ class TcpContext(object):
         socketConnections = {}
         for serverClient in self._servers + self._clients:
             for connection in serverClient._connections:
-                if connection.receiveBuffer.size < connection.receiveBuffer.capacity:
-                    rsockets.append(connection.connectionSocket)
+                if connection.receiveBuffer.size >= connection.receiveBuffer.capacity:
+                    connection.receiveBuffer.capacity *= 2
+                rsockets.append(connection.connectionSocket)
                 if connection.sendBuffer.size > 0:
                     wsockets.append(connection.connectionSocket)
                 xsockets.append(connection.connectionSocket)
@@ -364,30 +365,20 @@ class TcpContext(object):
                 continue
 
             serverClient, connection = socketConnections[rsocket]
-            totalReceived = 0
-            while True:
-                try:
-                    received = rsocket.recv_into(connection.receiveBuffer.writeView)
-                    if received == 0:
-                        break
-                    connection.receiveBuffer.size += received
-                    totalReceived += received
-                    if connection.receiveBuffer.capacity - connection.receiveBuffer.size < connection.receiveBuffer.capacity:
-                        connection.receiveBuffer.capacity *= 2
-                except socket.error as e:
-                    if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
-                        connection.closeType = 'Immediate'
-                        log.exception('error while trying to receive from connection %s: %s', connection, e)
-                    break
-
-            if connection.closeType == 'Immediate':
+            try:
+                received = rsocket.recv_into(connection.receiveBuffer.writeView)
+            except socket.error as e:
+                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    connection.closeType = 'Immediate'
+                    log.exception('error while trying to receive from connection %s: %s', connection, e)
                 continue
 
-            if totalReceived == 0:
+            if received == 0:
                 connection.closeType = 'AfterSend'
                 log.debug('received nothing from connection, maybe closed: %s', connection)
                 continue
 
+            connection.receiveBuffer.size += received
             receivedConnections.append((serverClient, connection))
 
         # handle sockets that can write
