@@ -112,7 +112,6 @@ class HttpServer(TcpServer):
         if 'content-length' in headers:
             length = int(headers['content-length'])
             if len(bufferData) < length + bufferConsumed:
-                log.warn('failed to parse http request because it is too long %d > %d', length + bufferConsumed, len(bufferData))
                 return None
             body = bytearray(bufferData[bufferConsumed:bufferConsumed + length])
             bufferConsumed += length
@@ -232,7 +231,6 @@ class HttpClient(TcpClient):
         if 'content-length' in headers:
             length = int(headers['content-length'])
             if len(bufferData) < length + bufferConsumed:
-                log.warn('failed to parse http response because it is too long %d > %d', length + bufferConsumed, len(bufferData))
                 return None
             body = bytearray(bufferData[bufferConsumed:bufferConsumed + length])
             bufferConsumed += length

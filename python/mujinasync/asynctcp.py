@@ -372,6 +372,10 @@ class TcpContext(object):
                     connection.closeType = 'Immediate'
                     log.exception('error while trying to receive from connection %s: %s', connection, e)
                 continue
+            except Exception as e:
+                connection.closeType = 'Immediate'
+                log.exception('error while trying to receive from connection %s: %s', connection, e)
+                continue
 
             if received == 0:
                 connection.closeType = 'AfterSend'
