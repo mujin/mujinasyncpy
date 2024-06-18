@@ -328,8 +328,9 @@ class TcpContext(object):
         socketConnections = {}
         for serverClient in self._servers + self._clients:
             for connection in serverClient._connections:
-                if connection.receiveBuffer.size < connection.receiveBuffer.capacity:
-                    rsockets.append(connection.connectionSocket)
+                if connection.receiveBuffer.size >= connection.receiveBuffer.capacity:
+                    connection.receiveBuffer.capacity *= 2
+                rsockets.append(connection.connectionSocket)
                 if connection.sendBuffer.size > 0:
                     wsockets.append(connection.connectionSocket)
                 xsockets.append(connection.connectionSocket)
@@ -366,6 +367,11 @@ class TcpContext(object):
             serverClient, connection = socketConnections[rsocket]
             try:
                 received = rsocket.recv_into(connection.receiveBuffer.writeView)
+            except socket.error as e:
+                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    connection.closeType = 'Immediate'
+                    log.exception('error while trying to receive from connection %s: %s', connection, e)
+                continue
             except Exception as e:
                 connection.closeType = 'Immediate'
                 log.exception('error while trying to receive from connection %s: %s', connection, e)
