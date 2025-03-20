@@ -169,14 +169,21 @@ class TcpClient(TcpServerClientBase):
     TCP client base.
     """
 
-    def __init__(self, ctx, endpoint, api=None, connectionClass=TcpConnection):
+    def __init__(self, ctx, endpoint, api=None, connectionClass=TcpConnection, useSsl=False, sslKeyCert=None):
         """Create a TCP client.
 
         :param endpoint: a tuple of (hostname, port) to connect to
         :param api: an api object to receive callback on
         :param connectionClass: the class to create for each TCP connection
         """
-        super(TcpClient, self).__init__(ctx, endpoint=endpoint, api=api, connectionClass=connectionClass)
+        sslContext = None
+        if useSsl or sslKeyCert is not None:
+            sslContext = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+            sslContext.check_hostname = False
+            sslContext.verify_mode = ssl.CERT_NONE
+            if sslKeyCert is not None:
+                sslContext.load_cert_chain(sslKeyCert)
+        super(TcpClient, self).__init__(ctx, endpoint=endpoint, api=api, connectionClass=connectionClass, sslContext=sslContext)
         self._ctx.RegisterClient(self)
 
     def Destroy(self):
@@ -309,10 +316,10 @@ class TcpContext(object):
                 clientSocket = None
                 try:
                     clientSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    clientSocket.connect(client._endpoint)
-                    log.debug('new connection to %s', client._endpoint)
                     if client._sslContext is not None:
                         clientSocket = client._sslContext.wrap_socket(clientSocket, server_side=False)
+                    clientSocket.connect(client._endpoint)
+                    log.debug('new connection to %s', client._endpoint)
                     clientSocket.setblocking(0) # TODO: deferred non-blocking after connect finishes, not ideal
                 except Exception as e:
                     if clientSocket:
