@@ -330,7 +330,7 @@ class TcpContext(object):
                 client._connections.append(connection)
                 newConnections.append((client, connection))
                 timeout = 0 # force no wait at select later since we have a new connection to report right away
-        
+
         # pool all the sockets
         socketConnections = {}
         for serverClient in self._servers + self._clients:
@@ -374,6 +374,9 @@ class TcpContext(object):
             serverClient, connection = socketConnections[rsocket]
             try:
                 received = rsocket.recv_into(connection.receiveBuffer.writeView)
+            except ssl.SSLWantReadError as e:
+                log.warn('ssl socket is not ready to receive from connection %s: %s', connection, e)
+                continue
             except socket.error as e:
                 if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
                     connection.closeType = 'Immediate'
