@@ -70,6 +70,7 @@ class TcpConnection(object):
     closeType = None # Immediate, AfterSend
     sendBuffer = None # buffer to hold data waiting to be sent
     receiveBuffer = None # buffer to hold data received before consumption
+    hasPendingWork: bool # Should this socket be submitted as a 'readable' socket even if no new data is received?
 
     def __init__(self, connectionSocket, remoteAddress):
         self.connectionSocket = connectionSocket
@@ -77,6 +78,7 @@ class TcpConnection(object):
         self.closeType = None
         self.sendBuffer = TcpBuffer()
         self.receiveBuffer = TcpBuffer()
+        self.hasPendingWork = False
 
     def __repr__(self):
         return '<%s(%s)>' % (self.__class__.__name__, ', '.join([
@@ -295,7 +297,7 @@ class TcpContext(object):
         :param timeout: in seconds, pass in 0 to not wait for socket events, otherwise, will wait up to specified timeout
         """
         newConnections = [] # list of tuple (serverClient, connection)
-        
+
         # construct a list of connections to select on
         rsockets = []
         wsockets = []
@@ -330,7 +332,7 @@ class TcpContext(object):
                 client._connections.append(connection)
                 newConnections.append((client, connection))
                 timeout = 0 # force no wait at select later since we have a new connection to report right away
-        
+
         # pool all the sockets
         socketConnections = {}
         for serverClient in self._servers + self._clients:
@@ -435,6 +437,12 @@ class TcpContext(object):
                     log.exception('failed to close connection socket: %s', e)
                 connection.connectionSocket = None
             serverClient._connections.remove(connection)
+
+        # Handle server sockets that are processing non-blocking work
+        for server in self._servers:
+            for connection in server._connections:
+                if connection.hasPendingWork:
+                    receivedConnections.append((server, connection))
 
         # let user code run at the very end
         for serverClient, connection in newConnections:
