@@ -1,13 +1,28 @@
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
+from typing import Optional, Any
+
 from .asynctcp import TcpServer, TcpConnection, TcpClient
 
 import logging
 log = logging.getLogger(__name__)
 
+class HttpResponseProcessing(Exception):
+    # Exception class that user logic can throw during HandleHttpRequest to indicate that they have received this
+    # request, but are not yet ready to return the response (e.g, calling a slow external resource), and the
+    # connection should not block for a response.
+    # If this is thrown, then the active request will be stashed on the connection and the http server will
+    # continue processing any other active requests
+    pass
+
 
 class HttpConnection(TcpConnection):
-    pass
+    # If this connection has already parsed a request, and that request has been pushed to the caller but backpressured,
+    # then it will be stashed on the connection so that it can be re-submitted each spin until the user logic is ready
+    # to return a response for it.
+    pendingRequest: Optional[HttpRequest]  = None
 
 class HttpRequest(object):
     method = 'GET'
@@ -18,6 +33,10 @@ class HttpRequest(object):
     body = None
 
     response = None
+
+    # For user programs that make use of non-blocking handlers
+    # Any information necessary to track the progress of the request can be stored here
+    userState: Optional[Any] = None
 
     def __repr__(self):
         return '<%s(%s)>' % (self.__class__.__name__, ', '.join([
@@ -73,19 +92,33 @@ class HttpServer(TcpServer):
         response = None
         try:
             response = self._HandleHttpRequest(connection, request)
+        except HttpResponseProcessing:
+            # if the current request would block, then cache it and re-submit it next loop to check if it is complete.
+            # send no response on the connection here - the request is still processing
+            connection.pendingRequest = request
+            connection.hasPendingWork = True
+            return
         except Exception as e:
             log.exception('caught exception while handling http request %r: %s', request, e)
-        finally:
-            if response is None:
-                response = HttpResponse(request, statusCode=500, statusText='Internal Server Error')
-            log.verbose('sending http response: %r', response)
-            self._SendHttpResponse(connection, request, response)
+
+        if response is None:
+            response = HttpResponse(request, statusCode=500, statusText='Internal Server Error')
+
+        self._SendHttpResponse(connection, request, response)
+
         return True # handled one request, try next one
 
     def _HandleHttpRequest(self, connection, request):
         return self._CallApi('HandleHttpRequest', request=request, connection=connection, server=self)
 
     def _TryReceiveHttpRequest(self, connection):
+        # If this connection already has a pending request, pop it off and return it
+        if connection.pendingRequest:
+            request = connection.pendingRequest
+            connection.pendingRequest = None
+            connection.hasPendingWork = False
+            return request
+
         bufferData = connection.receiveBuffer.readView.tobytes()
         if b'\r\n\r\n' not in bufferData:
             if len(bufferData) > 10240:
