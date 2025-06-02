@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 from typing import Optional, Any
 
 from .asynctcp import TcpServer, TcpConnection, TcpClient
@@ -20,7 +22,7 @@ class HttpConnection(TcpConnection):
     # If this connection has already parsed a request, and that request has been pushed to the caller but backpressured,
     # then it will be stashed on the connection so that it can be re-submitted each spin until the user logic is ready
     # to return a response for it.
-    pendingRequest: Optional["HttpRequest"]  = None
+    pendingRequest: Optional[HttpRequest]  = None
 
 class HttpRequest(object):
     method = 'GET'
@@ -91,8 +93,8 @@ class HttpServer(TcpServer):
         try:
             response = self._HandleHttpRequest(connection, request)
         except HttpResponseProcessing:
-            # If the current request would block, then cache it and re-submit it next loop to check if it is complete.
-            # Send no response on the connection here - the request is still processing
+            # if the current request would block, then cache it and re-submit it next loop to check if it is complete.
+            # send no response on the connection here - the request is still processing
             connection.pendingRequest = request
             connection.hasPendingWork = True
             return
@@ -102,7 +104,6 @@ class HttpServer(TcpServer):
         if response is None:
             response = HttpResponse(request, statusCode=500, statusText='Internal Server Error')
 
-        log.verbose('sending http response: %r', response)
         self._SendHttpResponse(connection, request, response)
 
         return True # handled one request, try next one

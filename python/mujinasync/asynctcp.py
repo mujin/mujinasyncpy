@@ -70,7 +70,7 @@ class TcpConnection(object):
     closeType = None # Immediate, AfterSend
     sendBuffer = None # buffer to hold data waiting to be sent
     receiveBuffer = None # buffer to hold data received before consumption
-    hasPendingWork: bool # Should this socket be submitted as a 'readable' socket even if no new data is received?
+    hasPendingWork: bool = False # should this socket be submitted as a 'readable' socket even if no new data is received?
 
     def __init__(self, connectionSocket, remoteAddress):
         self.connectionSocket = connectionSocket
