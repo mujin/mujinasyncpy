@@ -291,7 +291,7 @@ class TcpContext(object):
         if client in self._clients:
             self._clients.remove(client)
 
-    def SpinOnce(self, timeout=0):
+    def SpinOnce(self, timeout: float = 0):
         """Spin all sockets once, without creating threads.
 
         :param timeout: in seconds, pass in 0 to not wait for socket events, otherwise, will wait up to specified timeout
