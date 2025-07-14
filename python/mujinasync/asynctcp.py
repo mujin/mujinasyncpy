@@ -2,11 +2,12 @@
 
 import errno
 import select
+import selectors
 import socket
 import ssl
 
 import logging
-from typing import Optional, Type, cast
+from typing import Literal, Optional, Type, Union
 
 log = logging.getLogger(__name__)
 
@@ -67,9 +68,9 @@ class TcpConnection(object):
     Accepted TCP connection.
     """
 
-    connectionSocket = None # accepted socket object
+    connectionSocket: Optional[socket.socket] # accepted socket object
     remoteAddress = None # remote address
-    closeType = None # Immediate, AfterSend
+    closeType: Optional[Union[Literal['AfterSend'], Literal['Immediate']]] = None # Immediate, AfterSend
     sendBuffer: TcpBuffer # buffer to hold data waiting to be sent
     receiveBuffer: TcpBuffer # buffer to hold data received before consumption
     hasPendingWork: bool = False # should this socket be submitted as a 'readable' socket even if no new data is received?
@@ -300,12 +301,12 @@ class TcpContext(object):
 
         :param timeout: in seconds, pass in 0 to not wait for socket events, otherwise, will wait up to specified timeout
         """
-        newConnections = [] # list of tuple (serverClient, connection)
+        newConnections: list[tuple[Union[TcpServer, TcpClient], TcpConnection]] = [] # list of tuple (serverClient, connection)
 
         # construct a list of connections to select on
-        rsockets = []
-        wsockets = []
-        xsockets = []
+        rsockets: list[socket.socket] = []
+        wsockets: list[socket.socket] = []
+        xsockets: list[socket.socket] = []
 
         # bind and listen for server
         serverSockets: dict[socket.socket, TcpServer] = {} # map from serverSocket to server
@@ -338,9 +339,11 @@ class TcpContext(object):
                 timeout = 0 # force no wait at select later since we have a new connection to report right away
 
         # pool all the sockets
-        socketConnections = {}
+        socketConnections: dict[socket.socket, tuple[Union[TcpClient, TcpServer], TcpConnection]] = {}
         for serverClient in self._servers + self._clients:
             for connection in serverClient._connections:
+                if connection.connectionSocket is None:
+                    continue
                 if connection.receiveBuffer.size >= connection.receiveBuffer.capacity:
                     connection.receiveBuffer.capacity *= 2
                 rsockets.append(connection.connectionSocket)
@@ -349,68 +352,43 @@ class TcpContext(object):
                 xsockets.append(connection.connectionSocket)
                 socketConnections[connection.connectionSocket] = (serverClient, connection)
 
-        # use epoll if available, fallback to poll
-        use_epoll = hasattr(select, 'epoll')
-        poller = select.epoll() if use_epoll else select.poll()
-        
-        try:
-            socket_events = {}
-            all_sockets = set(rsockets + wsockets + xsockets)
-            
-            for sock in all_sockets:
-                events = 0
-                if sock in rsockets:
-                    events |= select.EPOLLIN if use_epoll else select.POLLIN
-                if sock in wsockets:
-                    events |= select.EPOLLOUT if use_epoll else select.POLLOUT
-                events |= select.EPOLLERR if use_epoll else select.POLLERR
-                
+        with selectors.DefaultSelector() as selector:
+            for sock in rsockets:
                 try:
-                    poller.register(sock.fileno(), events)
-                    socket_events[sock.fileno()] = sock
+                    selector.register(sock, selectors.EVENT_READ, data=sock)
                 except (OSError, ValueError) as e:
-                    log.warning('failed to register socket %s: %s', sock, e)
-                    continue
-
-            timeout_ms = int(timeout * 1000) if timeout > 0 else 0
+                    log.warning('failed to register read socket %s: %s', sock, e)
+            
+            for sock in wsockets:
+                try:
+                    # check if already registered for read, then modify
+                    try:
+                        selector.modify(sock, selectors.EVENT_READ | selectors.EVENT_WRITE, data=sock)
+                    except KeyError:
+                        selector.register(sock, selectors.EVENT_WRITE, data=sock)
+                except (OSError, ValueError) as e:
+                    log.warning('failed to register write socket %s: %s', sock, e)
+            
+            # wait for events
             while True:
                 try:
-                    events = poller.poll(timeout_ms)
+                    events = selector.select(timeout if timeout > 0 else None)
                     break
                 except (OSError, select.error) as e:
                     if e.args[0] != errno.EINTR:
                         raise
             
-            # convert events to select-style lists
+            # keep select-style
             rlist, wlist, xlist = [], [], []
-            for fd, event in events:
-                sock = socket_events.get(fd)
-                if sock is None:
-                    continue
-                    
-                if use_epoll:
-                    if event & select.EPOLLIN:
-                        rlist.append(sock)
-                    if event & select.EPOLLOUT:
-                        wlist.append(sock)
-                    if event & (select.EPOLLERR | select.EPOLLHUP):
-                        xlist.append(sock)
-                else:
-                    if event & select.POLLIN:
-                        rlist.append(sock)
-                    if event & select.POLLOUT:
-                        wlist.append(sock)
-                    if event & (select.POLLERR | select.POLLHUP):
-                        xlist.append(sock)
-        finally:
-            try:
-                if use_epoll:
-                    cast(select.epoll, poller).close()
-            except Exception:
-                pass
+            for key, mask in events:
+                sock = key.data
+                if mask & selectors.EVENT_READ:
+                    rlist.append(sock)
+                if mask & selectors.EVENT_WRITE:
+                    wlist.append(sock)
 
         # handle sockets that can read
-        receivedConnections = [] # list of tuple (serverClient, connection)
+        receivedConnections: list[tuple[Union[TcpServer, TcpClient], TcpConnection]] = [] # list of tuple (serverClient, connection)
         for rsocket in rlist:
             server = serverSockets.get(rsocket)
             if server is not None:
