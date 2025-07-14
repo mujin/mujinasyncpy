@@ -7,7 +7,7 @@ import socket
 import ssl
 
 import logging
-from typing import Literal, Optional, Type, Union
+from typing import Any, Literal, Optional, Type, Union
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class TcpBuffer(object):
         return self._size
 
     @size.setter
-    def size(self, size):
+    def size(self, size: int):
         if size < 0 or size > len(self._data):
             raise IndexError
         if size < self._size:
@@ -55,7 +55,7 @@ class TcpBuffer(object):
         return len(self._data)
 
     @capacity.setter
-    def capacity(self, capacity):
+    def capacity(self, capacity: int):
         if capacity < self._size:
             raise IndexError
         data = bytearray(capacity)
@@ -69,13 +69,13 @@ class TcpConnection(object):
     """
 
     connectionSocket: Optional[socket.socket] # accepted socket object
-    remoteAddress = None # remote address
+    remoteAddress: tuple[str, int] # remote address
     closeType: Optional[Union[Literal['AfterSend'], Literal['Immediate']]] = None # Immediate, AfterSend
     sendBuffer: TcpBuffer # buffer to hold data waiting to be sent
     receiveBuffer: TcpBuffer # buffer to hold data received before consumption
     hasPendingWork: bool = False # should this socket be submitted as a 'readable' socket even if no new data is received?
 
-    def __init__(self, connectionSocket, remoteAddress):
+    def __init__(self, connectionSocket: socket.socket, remoteAddress: tuple[str, int]):
         self.connectionSocket = connectionSocket
         self.remoteAddress = remoteAddress
         self.closeType = None
@@ -94,7 +94,7 @@ class TcpServerClientBase(object):
 
     _ctx: Optional['TcpContext'] # a TcpContext
     _endpoint: tuple[str, int] # connection endpoint, should be a tuple (host, port)
-    _api = None # an optional api object to receive callback on
+    _api: Optional[Any] = None # an optional api object to receive callback on
     _connectionClass: Type[TcpConnection] # class to hold accepted connection data
     _connections: list[TcpConnection] # a list of instances of connectionClass
     _sslContext: Optional[ssl.SSLContext] = None  # a ssl.SSLContext
@@ -204,8 +204,8 @@ class TcpServer(TcpServerClientBase):
     TCP server base.
     """
     _serverSocket: Optional[socket.socket] = None # listening socket
-    _backlog = 5 # number of connection to backlog before accepting
-    _resuseAddress = True # allow reuse of TCP port
+    _backlog: int = 5 # number of connection to backlog before accepting
+    _resuseAddress: bool = True # allow reuse of TCP port
 
     def __init__(self, ctx, endpoint, api=None, connectionClass=TcpConnection, sslKeyCert=None):
         """Create a TCP server.
