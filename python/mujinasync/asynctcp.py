@@ -6,6 +6,8 @@ import socket
 import ssl
 
 import logging
+from typing import Optional, Type, cast
+
 log = logging.getLogger(__name__)
 
 
@@ -13,8 +15,8 @@ class TcpBuffer(object):
     """Buffer object to manage socket receive and send
     """
 
-    _data = None
-    _size = 0
+    _data: bytearray
+    _size: int = 0
 
     def __init__(self):
         self._data = bytearray(64 * 1024)
@@ -68,8 +70,8 @@ class TcpConnection(object):
     connectionSocket = None # accepted socket object
     remoteAddress = None # remote address
     closeType = None # Immediate, AfterSend
-    sendBuffer = None # buffer to hold data waiting to be sent
-    receiveBuffer = None # buffer to hold data received before consumption
+    sendBuffer: TcpBuffer # buffer to hold data waiting to be sent
+    receiveBuffer: TcpBuffer # buffer to hold data received before consumption
     hasPendingWork: bool = False # should this socket be submitted as a 'readable' socket even if no new data is received?
 
     def __init__(self, connectionSocket, remoteAddress):
@@ -89,12 +91,12 @@ class TcpConnection(object):
 
 class TcpServerClientBase(object):
 
-    _ctx = None # a TcpContext
-    _endpoint = None # connection endpoint, should be a tuple (host, port)
+    _ctx: Optional['TcpContext'] # a TcpContext
+    _endpoint: tuple[str, int] # connection endpoint, should be a tuple (host, port)
     _api = None # an optional api object to receive callback on
-    _connectionClass = None # class to hold accepted connection data
-    _connections = None # a list of instances of connectionClass
-    _sslContext = None  # a ssl.SSLContext
+    _connectionClass: Type[TcpConnection] # class to hold accepted connection data
+    _connections: list[TcpConnection] # a list of instances of connectionClass
+    _sslContext: Optional[ssl.SSLContext] = None  # a ssl.SSLContext
 
     def __init__(self, ctx, endpoint, api=None, connectionClass=TcpConnection, sslContext=None):
         """Create a TCP client.
@@ -186,6 +188,7 @@ class TcpClient(TcpServerClientBase):
             if sslKeyCert is not None:
                 sslContext.load_cert_chain(sslKeyCert)
         super(TcpClient, self).__init__(ctx, endpoint=endpoint, api=api, connectionClass=connectionClass, sslContext=sslContext)
+        assert self._ctx
         self._ctx.RegisterClient(self)
 
     def Destroy(self):
@@ -199,7 +202,7 @@ class TcpServer(TcpServerClientBase):
     """
     TCP server base.
     """
-    _serverSocket = None # listening socket
+    _serverSocket: Optional[socket.socket] = None # listening socket
     _backlog = 5 # number of connection to backlog before accepting
     _resuseAddress = True # allow reuse of TCP port
 
@@ -215,6 +218,7 @@ class TcpServer(TcpServerClientBase):
             sslContext = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
             sslContext.load_cert_chain(sslKeyCert)
         super(TcpServer, self).__init__(ctx, endpoint=endpoint, api=api, connectionClass=connectionClass, sslContext=sslContext)
+        assert self._ctx
         self._ctx.RegisterServer(self)
 
     def Destroy(self):
@@ -234,7 +238,7 @@ class TcpServer(TcpServerClientBase):
                 serverSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 if self._resuseAddress:
                     serverSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                serverSocket.setblocking(0)
+                serverSocket.setblocking(False)
                 serverSocket.bind(self._endpoint)
                 serverSocket.listen(self._backlog)
                 self._serverSocket = serverSocket
@@ -262,8 +266,8 @@ class TcpServer(TcpServerClientBase):
 
 class TcpContext(object):
 
-    _servers = None # list of TcpServer
-    _clients = None # lits of TcpClient
+    _servers: list[TcpServer] # list of TcpServer
+    _clients: list[TcpClient] # lits of TcpClient
 
     def __init__(self):
         self._servers = []
@@ -304,7 +308,7 @@ class TcpContext(object):
         xsockets = []
 
         # bind and listen for server
-        serverSockets = {} # map from serverSocket to server
+        serverSockets: dict[socket.socket, TcpServer] = {} # map from serverSocket to server
         for server in self._servers:
             server._EnsureServerSocket()
             if server._serverSocket is not None:
@@ -322,7 +326,7 @@ class TcpContext(object):
                         clientSocket = client._sslContext.wrap_socket(clientSocket, server_side=False)
                     clientSocket.connect(client._endpoint)
                     log.debug('new connection to %s', client._endpoint)
-                    clientSocket.setblocking(0) # TODO: deferred non-blocking after connect finishes, not ideal
+                    clientSocket.setblocking(False) # TODO: deferred non-blocking after connect finishes, not ideal
                 except Exception as e:
                     if clientSocket:
                         clientSocket.close()
@@ -345,14 +349,65 @@ class TcpContext(object):
                 xsockets.append(connection.connectionSocket)
                 socketConnections[connection.connectionSocket] = (serverClient, connection)
 
-        # select
-        while True:
+        # use epoll if available, fallback to poll
+        use_epoll = hasattr(select, 'epoll')
+        poller = select.epoll() if use_epoll else select.poll()
+        
+        try:
+            socket_events = {}
+            all_sockets = set(rsockets + wsockets + xsockets)
+            
+            for sock in all_sockets:
+                events = 0
+                if sock in rsockets:
+                    events |= select.EPOLLIN if use_epoll else select.POLLIN
+                if sock in wsockets:
+                    events |= select.EPOLLOUT if use_epoll else select.POLLOUT
+                events |= select.EPOLLERR if use_epoll else select.POLLERR
+                
+                try:
+                    poller.register(sock.fileno(), events)
+                    socket_events[sock.fileno()] = sock
+                except (OSError, ValueError) as e:
+                    log.warning('failed to register socket %s: %s', sock, e)
+                    continue
+
+            timeout_ms = int(timeout * 1000) if timeout > 0 else 0
+            while True:
+                try:
+                    events = poller.poll(timeout_ms)
+                    break
+                except (OSError, select.error) as e:
+                    if e.args[0] != errno.EINTR:
+                        raise
+            
+            # convert events to select-style lists
+            rlist, wlist, xlist = [], [], []
+            for fd, event in events:
+                sock = socket_events.get(fd)
+                if sock is None:
+                    continue
+                    
+                if use_epoll:
+                    if event & select.EPOLLIN:
+                        rlist.append(sock)
+                    if event & select.EPOLLOUT:
+                        wlist.append(sock)
+                    if event & (select.EPOLLERR | select.EPOLLHUP):
+                        xlist.append(sock)
+                else:
+                    if event & select.POLLIN:
+                        rlist.append(sock)
+                    if event & select.POLLOUT:
+                        wlist.append(sock)
+                    if event & (select.POLLERR | select.POLLHUP):
+                        xlist.append(sock)
+        finally:
             try:
-                rlist, wlist, xlist = select.select(rsockets, wsockets, xsockets, timeout)
-                break
-            except (OSError, select.error) as e:
-                if e.args[0] != errno.EINTR:
-                    raise
+                if use_epoll:
+                    cast(select.epoll, poller).close()
+            except Exception:
+                pass
 
         # handle sockets that can read
         receivedConnections = [] # list of tuple (serverClient, connection)
@@ -360,11 +415,12 @@ class TcpContext(object):
             server = serverSockets.get(rsocket)
             if server is not None:
                 try:
+                    assert server._serverSocket
                     connectionSocket, remoteAddress = server._serverSocket.accept()
                     log.debug('new connection from %s on endpoint %s', remoteAddress, server._endpoint)
                     if server._sslContext is not None:
                         connectionSocket = server._sslContext.wrap_socket(connectionSocket, server_side=True)
-                    connectionSocket.setblocking(0)
+                    connectionSocket.setblocking(False)
                 except Exception as e:
                     log.exception('error while trying to accept connection: %s', e)
                     continue
@@ -409,13 +465,13 @@ class TcpContext(object):
 
         # handle sockets with exceptions
         for xsocket in xlist:
-            server = serverSockets.get(rsocket)
+            server = serverSockets.get(xsocket)
             if server is not None:
                 log.error('error in server socket, will recreate')
                 server._DestroyServerSocket()
                 continue
 
-            serverClient, connection = socketConnections[wsocket]
+            serverClient, connection = socketConnections[xsocket]
             connection.closeType = 'Immediate'
             log.error('error in connection, maybe closed: %s', connection)
 
