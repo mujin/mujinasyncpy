@@ -52,7 +52,7 @@ class HttpResponse(object):
     statusText = 'OK'
 
     headers = None
-    body = None
+    body: Optional[bytes] = None
 
     def __init__(self, request, httpVersion=None, statusCode=200, statusText='OK'):
         self.request = request
