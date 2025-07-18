@@ -306,7 +306,6 @@ class TcpContext(object):
         # construct a list of connections to select on
         rsockets: list[socket.socket] = []
         wsockets: list[socket.socket] = []
-        xsockets: list[socket.socket] = []
 
         # bind and listen for server
         serverSockets: dict[socket.socket, TcpServer] = {} # map from serverSocket to server
@@ -315,7 +314,6 @@ class TcpContext(object):
             if server._serverSocket is not None:
                 serverSockets[server._serverSocket] = server
                 rsockets.append(server._serverSocket)
-                xsockets.append(server._serverSocket)
 
         # connect for client
         for client in self._clients:
@@ -349,7 +347,6 @@ class TcpContext(object):
                 rsockets.append(connection.connectionSocket)
                 if connection.sendBuffer.size > 0:
                     wsockets.append(connection.connectionSocket)
-                xsockets.append(connection.connectionSocket)
                 socketConnections[connection.connectionSocket] = (serverClient, connection)
 
         with selectors.DefaultSelector() as selector:
@@ -379,7 +376,8 @@ class TcpContext(object):
                         raise
             
             # keep select-style
-            rlist, wlist, xlist = [], [], []
+            rlist: list[socket.socket] = []
+            wlist: list[socket.socket] = []
             for key, mask in events:
                 sock = key.data
                 if mask & selectors.EVENT_READ:
@@ -434,6 +432,11 @@ class TcpContext(object):
             if connection.sendBuffer.size > 0:
                 try:
                     sent = wsocket.send(connection.sendBuffer.readView)
+                except socket.error as e:
+                    if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                        connection.closeType = 'Immediate'
+                        log.exception('error while trying to send on connection %s: %s', connection, e)
+                    continue
                 except Exception as e:
                     connection.closeType = 'Immediate'
                     log.exception('error while trying to send on connection %s: %s', connection, e)
@@ -441,17 +444,6 @@ class TcpContext(object):
                 if sent > 0:
                     connection.sendBuffer.size -= sent
 
-        # handle sockets with exceptions
-        for xsocket in xlist:
-            server = serverSockets.get(xsocket)
-            if server is not None:
-                log.error('error in server socket, will recreate')
-                server._DestroyServerSocket()
-                continue
-
-            serverClient, connection = socketConnections[xsocket]
-            connection.closeType = 'Immediate'
-            log.error('error in connection, maybe closed: %s', connection)
 
         # handle closed connections
         closeConnections = [] # list of tuple (serverClient, connection)
