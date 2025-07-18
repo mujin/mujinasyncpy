@@ -11,6 +11,7 @@ from typing import Any, Literal, Optional, Type, Union
 
 log = logging.getLogger(__name__)
 
+TcpServerClient = Union['TcpServer', 'TcpClient']
 
 class TcpBuffer(object):
     """Buffer object to manage socket receive and send
@@ -301,7 +302,7 @@ class TcpContext(object):
 
         :param timeout: in seconds, pass in 0 to not wait for socket events, otherwise, will wait up to specified timeout
         """
-        newConnections: list[tuple[Union[TcpServer, TcpClient], TcpConnection]] = [] # list of tuple (serverClient, connection)
+        newConnections: list[tuple[TcpServerClient, TcpConnection]] = [] # list of tuple (serverClient, connection)
 
         # construct a list of connections to select on
         rsockets: list[socket.socket] = []
@@ -337,7 +338,7 @@ class TcpContext(object):
                 timeout = 0 # force no wait at select later since we have a new connection to report right away
 
         # pool all the sockets
-        socketConnections: dict[socket.socket, tuple[Union[TcpClient, TcpServer], TcpConnection]] = {}
+        socketConnections: dict[socket.socket, tuple[TcpServerClient, TcpConnection]] = {}
         for serverClient in self._servers + self._clients:
             for connection in serverClient._connections:
                 if connection.connectionSocket is None:
@@ -386,7 +387,7 @@ class TcpContext(object):
                     wlist.append(sock)
 
         # handle sockets that can read
-        receivedConnections: list[tuple[Union[TcpServer, TcpClient], TcpConnection]] = [] # list of tuple (serverClient, connection)
+        receivedConnections: list[tuple[TcpServerClient, TcpConnection]] = [] # list of tuple (serverClient, connection)
         for rsocket in rlist:
             server = serverSockets.get(rsocket)
             if server is not None:
@@ -446,7 +447,7 @@ class TcpContext(object):
 
 
         # handle closed connections
-        closeConnections = [] # list of tuple (serverClient, connection)
+        closeConnections: list[tuple[TcpServerClient, TcpConnection]] = [] # list of tuple (serverClient, connection)
         for serverClient in self._servers + self._clients:
             for connection in serverClient._connections:
                 if connection.closeType == 'Immediate':
