@@ -63,5 +63,5 @@ jobs:
 
     - name: Test with pytest
       run: |
-        pytest || true
+        pytest test/
 
