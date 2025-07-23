@@ -120,19 +120,31 @@ class TcpServerClientBase(object):
     def Destroy(self):
         self._CloseAllConnections()
 
+    def CloseConnection(self, connection: TcpConnection) -> None:
+        """ Close a connected connection
+        1. Unregister its connectionSocket from context's selector
+        2. Shutdown and close the socket
+        3. Remove this connection from self._connections
+        """
+        if connection not in self._connections:
+            return
+        if connection.connectionSocket is not None:
+            try:
+                if self._ctx:
+                    self._ctx.UnregisterSocket(connection.connectionSocket)
+                connection.connectionSocket.shutdown(socket.SHUT_RDWR)
+                connection.connectionSocket.close()
+            except Exception as e:
+                log.exception('failed to close connection socket: %s', e)
+            connection.connectionSocket = None
+        self._connections.remove(connection)
+
     def _CloseAllConnections(self):
         """Close all connected connections
         """
         connections = self._connections
-        self._connections = []
         for connection in connections:
-            if connection.connectionSocket is not None:
-                try:
-                    connection.connectionSocket.shutdown(socket.SHUT_RDWR)
-                    connection.connectionSocket.close()
-                except Exception as e:
-                    log.exception('failed to close connection socket: %s', e)
-                connection.connectionSocket = None
+            self.CloseConnection(connection)
         for connection in connections:
             self._HandleTcpDisconnect(connection)
 
@@ -194,11 +206,10 @@ class TcpClient(TcpServerClientBase):
         self._ctx.RegisterClient(self)
 
     def Destroy(self):
-        # should unregister client and client's connection sockets before removing
+        super(TcpClient, self).Destroy()
         if self._ctx is not None:
             self._ctx.UnregisterClient(self)
             self._ctx = None
-        super(TcpClient, self).Destroy()
 
 
 class TcpServer(TcpServerClientBase):
@@ -246,6 +257,8 @@ class TcpServer(TcpServerClientBase):
                 serverSocket.bind(self._endpoint)
                 serverSocket.listen(self._backlog)
                 self._serverSocket = serverSocket
+                if self._ctx:
+                    self._ctx.RegisterSocket(self._serverSocket, selectors.EVENT_READ)
                 serverSocket = None
                 log.debug('server socket listening on %s:%d', self._endpoint[0], self._endpoint[1])
             except Exception as e:
@@ -263,6 +276,8 @@ class TcpServer(TcpServerClientBase):
         """
         if self._serverSocket is not None:
             try:
+                if self._ctx:
+                    self._ctx.UnregisterSocket(self._serverSocket)
                 self._serverSocket.close()
             except Exception as e:
                 log.exception('failed to close server socket: %s', e)
@@ -295,9 +310,6 @@ class TcpContext(object):
 
     def UnregisterServer(self, server: TcpServer):
         if server in self._servers:
-            if (server._serverSocket):
-                self._UnregisterSocket(server._serverSocket)
-            self._UnregisterServerClient(server)
             self._servers.remove(server)
 
     def RegisterClient(self, client: TcpClient):
@@ -306,17 +318,13 @@ class TcpContext(object):
 
     def UnregisterClient(self, client: TcpClient):
         if client in self._clients:
-            self._UnregisterServerClient(client)
             self._clients.remove(client)
 
-    def _UnregisterServerClient(self, serverclient: TcpServerClient):
-        if serverclient not in self._clients and serverclient not in self._servers:
-          return
-        for connection in serverclient._connections:
-            if connection.connectionSocket is not None:
-                self._UnregisterSocket(connection.connectionSocket)
-
-    def _RegisterSocket(self, sock: socket.socket, mask: int) -> None:
+    def RegisterSocket(self, sock: socket.socket, mask: int) -> None:
+        """
+        Register socket to selector
+        Should be called when socket is created
+        """
         assert self._selector, "selector is not ready"
         existingMask = self._registeredSocketMaskBySocket.get(sock)
         if existingMask == mask:
@@ -334,7 +342,11 @@ class TcpContext(object):
         except (OSError, ValueError) as e:
             log.warning('failed to register socket %s: %s', sock, e)
 
-    def _UnregisterSocket(self, sock: socket.socket) -> None:
+    def UnregisterSocket(self, sock: socket.socket) -> None:
+        """
+        Unregister socket from selector
+        Should be called when socket is destoryed
+        """
         assert self._selector, "selector is not ready"
         existingMask = self._registeredSocketMaskBySocket.get(sock)
         if existingMask is None:
@@ -361,8 +373,6 @@ class TcpContext(object):
             server._EnsureServerSocket()
             if server._serverSocket is not None:
                 serverSockets[server._serverSocket] = server
-                sock = server._serverSocket
-                self._RegisterSocket(sock, selectors.EVENT_READ)
 
         # connect for client
         for client in self._clients:
@@ -396,7 +406,7 @@ class TcpContext(object):
                 if connection.sendBuffer.size > 0:
                     mask |= selectors.EVENT_WRITE
                 sock = connection.connectionSocket
-                self._RegisterSocket(sock, mask)
+                self.RegisterSocket(sock, mask)
                 socketConnections[sock] = (serverClient, connection)
         
         # wait for events
@@ -487,16 +497,8 @@ class TcpContext(object):
                 elif connection.closeType == 'AfterSend' and connection.sendBuffer.size == 0:
                     closeConnections.append((serverClient, connection))
         for serverClient, connection in closeConnections:
-            if connection.connectionSocket is not None:
-                log.debug('closing connection from %s on endpoint %s', connection.remoteAddress, serverClient._endpoint)
-                try:
-                    self._UnregisterSocket(connection.connectionSocket)
-                    connection.connectionSocket.shutdown(socket.SHUT_RDWR)
-                    connection.connectionSocket.close()
-                except Exception as e:
-                    log.exception('failed to close connection socket: %s', e)
-                connection.connectionSocket = None
-            serverClient._connections.remove(connection)
+            log.debug('closing connection from %s on endpoint %s', connection.remoteAddress, serverClient._endpoint)
+            serverClient.CloseConnection(connection)
 
         # Handle server sockets that are processing non-blocking work
         for server in self._servers:

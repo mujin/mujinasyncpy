@@ -130,6 +130,9 @@ class TestAsyncTcp:
         server.Destroy()
         client.Destroy()
 
+        assert len(client._connections) == 0
+        assert len(server._connections) == 0
+
     def test_Handle_EAGAIN_OnRecv(self, mocker: MockerFixture) -> None:
         """Test EAGAIN / EWOULDBLOCK handling on recv_into"""
         ctx = TcpContext()
@@ -276,14 +279,14 @@ class TestAsyncTcp:
 
         assert ctx._selector
 
-        servers = []
+        servers: list[TcpServer] = []
         for i in range(SERVER_COUNT):
             endpoint = ("127.0.0.1", 12351 + i)
             server = TcpServer(ctx, endpoint)
             server._EnsureServerSocket()
             servers.append(server)
 
-        clients = []
+        clients: list[TcpClient] = []
         for server in servers:
             for _ in range(CLIENT_PER_SERVER):
                 client = TcpClient(ctx, server._endpoint)
@@ -340,5 +343,12 @@ class TestAsyncTcp:
 
         for client in clients:
             client.Destroy()
+            assert len(client._connections) == 0
+
+        # Allow servers to process client disconnections
+        for _ in range(MAX_RETRY_ATTEMPTS):
+            ctx.SpinOnce(timeout=TIMEOUT)
+
         for server in servers:
             server.Destroy()
+            assert len(server._connections) == 0
