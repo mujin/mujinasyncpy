@@ -236,12 +236,11 @@ class TcpServer(TcpServerClientBase):
         self._ctx.RegisterServer(self)
 
     def Destroy(self):
-        # should unregister server and server's connection sockets and server sockets before removing
+        self._DestroyServerSocket()
+        super(TcpServer, self).Destroy()
         if self._ctx is not None:
             self._ctx.UnregisterServer(self)
             self._ctx = None
-        self._DestroyServerSocket()
-        super(TcpServer, self).Destroy()
 
     def _EnsureServerSocket(self):
         """Ensure server socket to listen for incoming TCP connections.
