@@ -203,7 +203,7 @@ class TestAsyncTcp:
         server = TcpServer(ctx, serverEndpoint)
         server._EnsureServerSocket()
 
-        clients = []
+        clients: list[TcpClient] = []
         for i in range(3):
             client = TcpClient(ctx, serverEndpoint)
             clients.append(client)

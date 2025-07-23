@@ -194,10 +194,11 @@ class TcpClient(TcpServerClientBase):
         self._ctx.RegisterClient(self)
 
     def Destroy(self):
-        super(TcpClient, self).Destroy()
+        # should unregister client and client's connection sockets before removing
         if self._ctx is not None:
             self._ctx.UnregisterClient(self)
             self._ctx = None
+        super(TcpClient, self).Destroy()
 
 
 class TcpServer(TcpServerClientBase):
@@ -224,11 +225,12 @@ class TcpServer(TcpServerClientBase):
         self._ctx.RegisterServer(self)
 
     def Destroy(self):
-        self._DestroyServerSocket()
-        super(TcpServer, self).Destroy()
+        # should unregister server and server's connection sockets and server sockets before removing
         if self._ctx is not None:
             self._ctx.UnregisterServer(self)
             self._ctx = None
+        self._DestroyServerSocket()
+        super(TcpServer, self).Destroy()
 
     def _EnsureServerSocket(self):
         """Ensure server socket to listen for incoming TCP connections.
@@ -271,6 +273,7 @@ class TcpContext(object):
     _servers: list[TcpServer] # list of TcpServer
     _clients: list[TcpClient] # lits of TcpClient
     _selector: Optional[selectors.DefaultSelector] # selector, on Debian it will be EpollSelector
+    _registeredSocketMaskBySocket: dict[socket.socket, int] = {} # dict of socket -> socketMask(int)
 
     def __init__(self):
         self._servers = []
@@ -286,43 +289,62 @@ class TcpContext(object):
             self._selector = None
         self._servers = []
 
-    def RegisterServer(self, server):
+    def RegisterServer(self, server: TcpServer):
         if server not in self._servers:
             self._servers.append(server)
 
-    def UnregisterServer(self, server):
+    def UnregisterServer(self, server: TcpServer):
         if server in self._servers:
+            if (server._serverSocket):
+                self._UnregisterSocket(server._serverSocket)
+            self._UnregisterServerClient(server)
             self._servers.remove(server)
 
-    def RegisterClient(self, client):
+    def RegisterClient(self, client: TcpClient):
         if client not in self._clients:
             self._clients.append(client)
 
-    def UnregisterClient(self, client):
+    def UnregisterClient(self, client: TcpClient):
         if client in self._clients:
+            self._UnregisterServerClient(client)
             self._clients.remove(client)
 
-    def _RegisterOrModifySocket(self, sock: socket.socket, expectedMask: int, socketToKey: dict) -> None:
-        """
-        Register or modify a socket in the selector.
+    def _UnregisterServerClient(self, serverclient: TcpServerClient):
+        if serverclient not in self._clients and serverclient not in self._servers:
+          return
+        for connection in serverclient._connections:
+            if connection.connectionSocket is not None:
+                self._UnregisterSocket(connection.connectionSocket)
 
-        sock: Socket to register/modify
-        expectedMask: Expected event mask (EVENT_READ, EVENT_WRITE, etc.)
-        socketToKey: Dictionary mapping socket to SelectorKey
-        """
+    def _RegisterSocket(self, sock: socket.socket, mask: int) -> None:
         assert self._selector, "selector is not ready"
-        if sock not in socketToKey:
-            # register new socket to selector
-            try:
-                self._selector.register(sock, expectedMask, data=sock)
-            except (OSError, ValueError) as e:
-                log.warning('failed to register socket %s: %s', sock, e)
-        elif socketToKey[sock].events != expectedMask:
-            # update old socket in selector
-            try:
-                self._selector.modify(sock, expectedMask, data=sock)
-            except (OSError, ValueError, KeyError) as e:
-                log.warning('failed to modify socket %s: %s', sock, e)
+        existingMask = self._registeredSocketMaskBySocket.get(sock)
+        if existingMask == mask:
+            return
+
+        try:
+            if existingMask is None:
+                # register new socket to selector
+                self._selector.register(sock, mask, data=sock)
+                self._registeredSocketMaskBySocket[sock] = mask
+            else:
+                # update exisiting socket in selector
+                self._selector.modify(sock, mask, data=sock)
+                self._registeredSocketMaskBySocket[sock] = mask
+        except (OSError, ValueError) as e:
+            log.warning('failed to register socket %s: %s', sock, e)
+
+    def _UnregisterSocket(self, sock: socket.socket) -> None:
+        assert self._selector, "selector is not ready"
+        existingMask = self._registeredSocketMaskBySocket.get(sock)
+        if existingMask is None:
+            return
+
+        try:
+            self._selector.unregister(sock)
+            self._registeredSocketMaskBySocket.pop(sock)
+        except (OSError, ValueError, KeyError) as e:
+            log.warning('failed to unregister unused socket %s: %s', sock, e)
 
     def SpinOnce(self, timeout=0):
         """Spin all sockets once, without creating threads.
@@ -331,9 +353,6 @@ class TcpContext(object):
         """
         assert self._selector, "selector is not ready"
         newConnections: list[tuple[TcpServerClient, TcpConnection]] = [] # list of tuple (serverClient, connection)
-
-        selectorMap = dict(self._selector.get_map()) # fd -> SelectorKey
-        socketToKey = {key.fileobj: key for key in selectorMap.values()} # socket -> SelectorKey
         socketConnections: dict[socket.socket, tuple[TcpServerClient, TcpConnection]] = {} # Track socket->connection mapping and server sockets
 
         # bind and listen for server
@@ -343,11 +362,7 @@ class TcpContext(object):
             if server._serverSocket is not None:
                 serverSockets[server._serverSocket] = server
                 sock = server._serverSocket
-                expectedMask = selectors.EVENT_READ
-
-                # Register socket to listen for event
-                self._RegisterOrModifySocket(sock, expectedMask, socketToKey)
-                socketToKey.pop(sock, None)
+                self._RegisterSocket(sock, selectors.EVENT_READ)
 
         # connect for client
         for client in self._clients:
@@ -377,20 +392,12 @@ class TcpContext(object):
                     continue
                 if connection.receiveBuffer.size >= connection.receiveBuffer.capacity:
                     connection.receiveBuffer.capacity *= 2
-                expectedMask = selectors.EVENT_READ
+                mask = selectors.EVENT_READ
                 if connection.sendBuffer.size > 0:
-                    expectedMask |= selectors.EVENT_WRITE
+                    mask |= selectors.EVENT_WRITE
                 sock = connection.connectionSocket
-                self._RegisterOrModifySocket(sock, expectedMask, socketToKey)
+                self._RegisterSocket(sock, mask)
                 socketConnections[sock] = (serverClient, connection)
-                socketToKey.pop(sock, None)
-
-        # Unregister any remaining sockets (those that are no longer needed)
-        for sock in socketToKey:
-            try:
-                self._selector.unregister(sock)
-            except (OSError, ValueError, KeyError) as e:
-                log.warning('failed to unregister unused socket %s: %s', sock, e)
         
         # wait for events
         while True:
@@ -483,6 +490,7 @@ class TcpContext(object):
             if connection.connectionSocket is not None:
                 log.debug('closing connection from %s on endpoint %s', connection.remoteAddress, serverClient._endpoint)
                 try:
+                    self._UnregisterSocket(connection.connectionSocket)
                     connection.connectionSocket.shutdown(socket.SHUT_RDWR)
                     connection.connectionSocket.close()
                 except Exception as e:
