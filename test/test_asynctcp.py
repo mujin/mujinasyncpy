@@ -271,6 +271,80 @@ class TestAsyncTcp:
         client2.Destroy()
         server2.Destroy()
 
+    def test_BufferCapacityExpansion(self) -> None:
+        """Test automatic buffer capacity expansion when receive buffer is full"""
+        ctx = TcpContext()
+        endpoint = ("127.0.0.1", 12360)
+
+        server = TcpServer(ctx, endpoint)
+        server._EnsureServerSocket()
+        client = TcpClient(ctx, endpoint)
+
+        for _ in range(MAX_RETRY_ATTEMPTS):
+            ctx.SpinOnce(timeout=TIMEOUT)
+            if len(server._connections) > 0 and len(client._connections) > 0:
+                break
+
+        assert len(server._connections) > 0, "Server should have connection"
+        serverConnection = server._connections[0]
+
+        initialCapacity = serverConnection.receiveBuffer.capacity
+        serverConnection.receiveBuffer.size = initialCapacity
+
+        ctx.SpinOnce(timeout=TIMEOUT)
+
+        assert serverConnection.receiveBuffer.capacity == initialCapacity * 2, (
+            f"Buffer capacity should be doubled from {initialCapacity} to {initialCapacity * 2}, "
+            f"got {serverConnection.receiveBuffer.capacity}"
+        )
+
+        server.Destroy()
+        client.Destroy()
+
+    def test_MultipleSimultaneousAccepts(self) -> None:
+        """Test server handling multiple simultaneous connection attempts"""
+        ctx = TcpContext()
+        endpoint = ("127.0.0.1", 12361)
+
+        server = TcpServer(ctx, endpoint)
+        server._EnsureServerSocket()
+
+        clients = []
+        for i in range(5):
+            client = TcpClient(ctx, endpoint)
+            clients.append(client)
+
+        connectionsSeen = set()
+        for _ in range(MAX_RETRY_ATTEMPTS):
+            ctx.SpinOnce(timeout=TIMEOUT)
+
+            currentConnections = set()
+            for conn in server._connections:
+                if conn.connectionSocket:
+                    currentConnections.add(id(conn.connectionSocket))
+
+            connectionsSeen.update(currentConnections)
+
+            # Check if all clients are connected
+            if len(server._connections) == 5 and all(
+                len(c._connections) > 0 for c in clients
+            ):
+                break
+
+        assert len(server._connections) == 5, (
+            f"Expected 5 connections, got {len(server._connections)}"
+        )
+        assert len(connectionsSeen) == 5, (
+            f"Expected 5 unique connections, saw {len(connectionsSeen)}"
+        )
+
+        for i, client in enumerate(clients):
+            assert len(client._connections) == 1, f"Client {i} should have 1 connection"
+
+        for client in clients:
+            client.Destroy()
+        server.Destroy()
+
     def test_MultipleServersMultipleClients(self) -> None:
         """Test multiple servers with multiple clients connecting to each"""
         SERVER_COUNT = 10
@@ -343,12 +417,57 @@ class TestAsyncTcp:
 
         for client in clients:
             client.Destroy()
-            assert len(client._connections) == 0
-
-        # Allow servers to process client disconnections
-        for _ in range(MAX_RETRY_ATTEMPTS):
-            ctx.SpinOnce(timeout=TIMEOUT)
 
         for server in servers:
             server.Destroy()
-            assert len(server._connections) == 0
+
+    def test_ConnectionCleanupDuringDestroy(self) -> None:
+        """Test proper cleanup when servers/clients are destroyed with active connections"""
+        ctx = TcpContext()
+        endpoint = ("127.0.0.1", 12362)
+
+        server = TcpServer(ctx, endpoint)
+        server._EnsureServerSocket()
+        clients: list[TcpClient] = []
+
+        for _ in range(3):
+            client = TcpClient(ctx, endpoint)
+            clients.append(client)
+
+        for _ in range(MAX_RETRY_ATTEMPTS):
+            ctx.SpinOnce(timeout=TIMEOUT)
+            if len(server._connections) == 3 and all(
+                len(c._connections) > 0 for c in clients
+            ):
+                break
+
+        assert len(server._connections) == 3, "Should have 3 server connections"
+
+        testData = b"Test data before cleanup"
+        for client in clients:
+            if client._connections:
+                conn = client._connections[0]
+                conn.sendBuffer.writeView[: len(testData)] = testData
+                conn.sendBuffer.size = len(testData)
+
+        ctx.SpinOnce(timeout=TIMEOUT)
+
+        initRegisteredSocketCount = len(ctx._selector.get_map()) if ctx._selector else 0
+
+        server.Destroy()
+        assert len(server._connections) == 0, (
+            "Server should have no connections after destroy"
+        )
+
+        finalRegisteredSocketCount = (
+            len(ctx._selector.get_map()) if ctx._selector else 0
+        )
+        assert finalRegisteredSocketCount < initRegisteredSocketCount, (
+            f"Selector should have fewer sockets after cleanup: {finalRegisteredSocketCount} < {initRegisteredSocketCount}"
+        )
+
+        for client in clients:
+            client.Destroy()
+            assert len(client._connections) == 0, (
+                "Client should have no connections after destroy"
+            )

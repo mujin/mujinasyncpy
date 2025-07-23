@@ -132,7 +132,12 @@ class TcpServerClientBase(object):
             try:
                 if self._ctx:
                     self._ctx.UnregisterSocket(connection.connectionSocket)
-                connection.connectionSocket.shutdown(socket.SHUT_RDWR)
+                try:
+                    connection.connectionSocket.shutdown(socket.SHUT_RDWR)
+                except OSError as e:
+                    # Socket may already be disconnected
+                    if e.errno not in (errno.ENOTCONN, errno.EBADF):
+                        raise
                 connection.connectionSocket.close()
             except Exception as e:
                 log.exception('failed to close connection socket: %s', e)
@@ -142,7 +147,7 @@ class TcpServerClientBase(object):
     def _CloseAllConnections(self):
         """Close all connected connections
         """
-        connections = self._connections
+        connections = list(self._connections)  # Make a copy to avoid modification during iteration
         for connection in connections:
             self.CloseConnection(connection)
         for connection in connections:
@@ -346,13 +351,13 @@ class TcpContext(object):
         Unregister socket from selector
         Should be called when socket is destoryed
         """
-        assert self._selector, "selector is not ready"
         existingMask = self._registeredSocketMaskBySocket.get(sock)
         if existingMask is None:
             return
 
         try:
-            self._selector.unregister(sock)
+            if self._selector:
+                self._selector.unregister(sock)
             self._registeredSocketMaskBySocket.pop(sock)
         except (OSError, ValueError, KeyError) as e:
             log.warning('failed to unregister unused socket %s: %s', sock, e)
@@ -447,6 +452,8 @@ class TcpContext(object):
                 newConnections.append((server, connection))
                 continue
 
+            if rsocket not in socketConnections:
+                continue  # socket was removed during cleanup
             serverClient, connection = socketConnections[rsocket]
             try:
                 received = rsocket.recv_into(connection.receiveBuffer.writeView)
@@ -470,6 +477,8 @@ class TcpContext(object):
 
         # handle sockets that can write
         for wsocket in wlist:
+            if wsocket not in socketConnections:
+                continue  # socket was removed during cleanup
             serverClient, connection = socketConnections[wsocket]
             if connection.sendBuffer.size > 0:
                 try:
