@@ -362,7 +362,7 @@ class TcpContext(object):
         except (OSError, ValueError, KeyError) as e:
             log.warning('failed to unregister unused socket %s: %s', sock, e)
 
-    def SpinOnce(self, timeout=0):
+    def SpinOnce(self, timeout:float = 0):
         """Spin all sockets once, without creating threads.
 
         :param timeout: in seconds, pass in 0 to not wait for socket events, otherwise, will wait up to specified timeout
@@ -416,7 +416,7 @@ class TcpContext(object):
         # wait for events
         while True:
             try:
-                events = self._selector.select(timeout if timeout > 0 else None)
+                events = self._selector.select(timeout)
                 break
             except (OSError, select.error) as e:
                 if e.args[0] != errno.EINTR:
