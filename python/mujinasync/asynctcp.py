@@ -7,10 +7,11 @@ import socket
 import ssl
 
 import logging
-from typing import Any, Literal, Optional, Type, Union
+from typing import Any, Generic, Literal, Optional, Type, TypeVar, Union, cast
 
 log = logging.getLogger(__name__)
 
+TConnectionType = TypeVar('TConnectionType', bound='TcpConnection')
 TcpServerClient = Union['TcpServer', 'TcpClient']
 
 class TcpBuffer(object):
@@ -91,16 +92,16 @@ class TcpConnection(object):
         ]))
 
 
-class TcpServerClientBase(object):
+class TcpServerClientBase(Generic[TConnectionType]):
 
     _ctx: Optional['TcpContext'] # a TcpContext
     _endpoint: tuple[str, int] # connection endpoint, should be a tuple (host, port)
     _api: Optional[Any] = None # an optional api object to receive callback on
-    _connectionClass: Type[TcpConnection] # class to hold accepted connection data
-    _connections: list[TcpConnection] # a list of instances of connectionClass
+    _connectionClass: Type[TConnectionType] # class to hold accepted connection data
+    _connections: list[TConnectionType] # a list of instances of connectionClass
     _sslContext: Optional[ssl.SSLContext] = None  # a ssl.SSLContext
 
-    def __init__(self, ctx, endpoint, api=None, connectionClass=TcpConnection, sslContext=None):
+    def __init__(self, ctx: 'TcpContext', endpoint: tuple[str, int], api=None, connectionClass: Type[TConnectionType] = cast(Type[TConnectionType], TcpConnection), sslContext=None):
         """Create a TCP client.
 
         :param endpoint: a tuple of (hostname, port)
@@ -120,7 +121,7 @@ class TcpServerClientBase(object):
     def Destroy(self):
         self._CloseAllConnections()
 
-    def _CloseConnection(self, connection: TcpConnection) -> None:
+    def _CloseConnection(self, connection: TConnectionType) -> None:
         """ Close a connected connection
         1. Unregister its connectionSocket from context's selector
         2. Shutdown and close the socket
@@ -153,24 +154,24 @@ class TcpServerClientBase(object):
         for connection in connections:
             self._HandleTcpDisconnect(connection)
 
-    def _HandleTcpConnect(self, connection):
+    def _HandleTcpConnect(self, connection: TConnectionType) -> None:
         """Handle new connection.
 
-        :param connection: instance of TcpConnection
+        :param connection: instance of TConnectionType
         """
         self._CallApi('HandleTcpConnect', connection=connection, server=self)
 
-    def _HandleTcpDisconnect(self, connection):
+    def _HandleTcpDisconnect(self, connection: TConnectionType) -> None:
         """Handle disconnect.
 
-        :param connection: instance of TcpConnection
+        :param connection: instance of TConnectionType
         """
         self._CallApi('HandleTcpDisconnect', connection=connection, server=self)
 
-    def _HandleTcpReceive(self, connection):
-        """Handle recieve new data.
+    def _HandleTcpReceive(self, connection: TConnectionType) -> None:
+        """Handle receive new data.
 
-        :param connection: instance of TcpConnection
+        :param connection: instance of TConnectionType
         """
         self._CallApi('HandleTcpReceive', connection=connection, server=self)
 
@@ -187,12 +188,12 @@ class TcpServerClientBase(object):
         return None
 
 
-class TcpClient(TcpServerClientBase):
+class TcpClient(TcpServerClientBase[TConnectionType]):
     """
     TCP client base.
     """
 
-    def __init__(self, ctx, endpoint, api=None, connectionClass=TcpConnection, useSsl=False, sslKeyCert=None):
+    def __init__(self, ctx: 'TcpContext', endpoint: tuple[str, int], api=None, connectionClass: Type[TConnectionType] = cast(Type[TConnectionType], TcpConnection), useSsl=False, sslKeyCert=None):
         """Create a TCP client.
 
         :param endpoint: a tuple of (hostname, port) to connect to
@@ -217,7 +218,7 @@ class TcpClient(TcpServerClientBase):
             self._ctx = None
 
 
-class TcpServer(TcpServerClientBase):
+class TcpServer(TcpServerClientBase[TConnectionType]):
     """
     TCP server base.
     """
@@ -225,7 +226,7 @@ class TcpServer(TcpServerClientBase):
     _backlog: int = 5 # number of connection to backlog before accepting
     _resuseAddress: bool = True # allow reuse of TCP port
 
-    def __init__(self, ctx, endpoint, api=None, connectionClass=TcpConnection, sslKeyCert=None):
+    def __init__(self, ctx: 'TcpContext', endpoint: tuple[str, int], api=None, connectionClass: Type[TConnectionType] = cast(Type[TConnectionType], TcpConnection), sslKeyCert=None):
         """Create a TCP server.
 
         :param endpoint: a tuple of (hostname, port), set hostname to empty string to listen wildcard
@@ -290,7 +291,7 @@ class TcpServer(TcpServerClientBase):
 class TcpContext(object):
 
     _servers: list[TcpServer] # list of TcpServer
-    _clients: list[TcpClient] # lits of TcpClient
+    _clients: list[TcpClient] # list of TcpClient
     _selector: Optional[selectors.DefaultSelector] # selector, on Debian it will be EpollSelector
     _registeredSocketMaskBySocket: dict[socket.socket, int] # dict of socket -> socketMask(int)
 
@@ -362,7 +363,7 @@ class TcpContext(object):
         except (OSError, ValueError, KeyError) as e:
             log.warning('failed to unregister unused socket %s: %s', sock, e)
 
-    def SpinOnce(self, timeout:float = 0):
+    def SpinOnce(self, timeout: float = 0):
         """Spin all sockets once, without creating threads.
 
         :param timeout: in seconds, pass in 0 to not wait for socket events, otherwise, will wait up to specified timeout
@@ -435,8 +436,8 @@ class TcpContext(object):
         # handle sockets that can read
         receivedConnections: list[tuple[TcpServerClient, TcpConnection]] = [] # list of tuple (serverClient, connection)
         for rsocket in rlist:
-            server = tcpServersBySocket.get(rsocket)
-            if server is not None:
+            if rsocket in tcpServersBySocket:
+                server = tcpServersBySocket[rsocket]
                 try:
                     assert server._serverSocket
                     connectionSocket, remoteAddress = server._serverSocket.accept()
