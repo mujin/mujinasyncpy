@@ -7,7 +7,7 @@ import socket
 import ssl
 
 import logging
-from typing import Any, Literal, Optional, Type, Union
+from typing import Any, Literal, Optional, Type, Union, Callable
 
 log = logging.getLogger(__name__)
 
@@ -294,11 +294,22 @@ class TcpContext(object):
     _selector: Optional[selectors.DefaultSelector] # selector, on Debian it will be EpollSelector
     _registeredSocketMaskBySocket: dict[socket.socket, int] # dict of socket -> socketMask(int)
 
+    # Logging function to use for verbose messages.
+    # If the log facility allows for it, this will be log.verbose. If not, we will fall back to log.debug.
+    _verboseLog: Callable[..., None]
+
     def __init__(self):
         self._servers = []
         self._clients = []
         self._selector = selectors.DefaultSelector()
         self._registeredSocketMaskBySocket = {}
+
+        # If our logger has a verbose option, cache it to take advantage of more log levels.
+        # If it doesn't, any logs that _would_ be verbose are bumped to debug.
+        if hasattr(log, 'verbose'):
+            self._verboseLog = log.verbose
+        else:
+            self._verboseLog = log.debug
 
     def __del__(self):
         self.Destroy()
@@ -387,7 +398,7 @@ class TcpContext(object):
                     if client._sslContext is not None:
                         clientSocket = client._sslContext.wrap_socket(clientSocket, server_side=False)
                     clientSocket.connect(client._endpoint)
-                    log.debug('new connection to %s', client._endpoint)
+                    self._verboseLog('new connection to %s', client._endpoint)
                     clientSocket.setblocking(False) # TODO: deferred non-blocking after connect finishes, not ideal
                 except Exception as e:
                     if clientSocket:
@@ -412,7 +423,7 @@ class TcpContext(object):
                 sock = connection.connectionSocket
                 self._RegisterSocket(sock, mask)
                 socketConnections[sock] = (serverClient, connection)
-        
+
         # wait for events
         while True:
             try:
@@ -421,7 +432,7 @@ class TcpContext(object):
             except (OSError, select.error) as e:
                 if e.args[0] != errno.EINTR:
                     raise
-        
+
         # keep select-style
         rlist: list[socket.socket] = []
         wlist: list[socket.socket] = []
@@ -440,7 +451,7 @@ class TcpContext(object):
                 try:
                     assert server._serverSocket
                     connectionSocket, remoteAddress = server._serverSocket.accept()
-                    log.debug('new connection from %s on endpoint %s', remoteAddress, server._endpoint)
+                    self._verboseLog('new connection from %s on endpoint %s', remoteAddress, server._endpoint)
                     if server._sslContext is not None:
                         connectionSocket = server._sslContext.wrap_socket(connectionSocket, server_side=True)
                     connectionSocket.setblocking(False)
@@ -469,7 +480,7 @@ class TcpContext(object):
 
             if received == 0:
                 connection.closeType = 'AfterSend'
-                log.debug('received nothing from connection, maybe closed: %s', connection)
+                self._verboseLog('received nothing from connection, maybe closed: %s', connection)
                 continue
 
             connection.receiveBuffer.size += received
@@ -505,7 +516,7 @@ class TcpContext(object):
                 elif connection.closeType == 'AfterSend' and connection.sendBuffer.size == 0:
                     closeConnections.append((serverClient, connection))
         for serverClient, connection in closeConnections:
-            log.debug('closing connection from %s on endpoint %s', connection.remoteAddress, serverClient._endpoint)
+            self._verboseLog('closing connection from %s on endpoint %s', connection.remoteAddress, serverClient._endpoint)
             serverClient._CloseConnection(connection)
 
         # Handle server sockets that are processing non-blocking work
