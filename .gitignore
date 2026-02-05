@@ -1,6 +1,7 @@
 # python bytecode
 __pycache__
 *.py[cod]
+*.egg-info/
 
 # other binaries
 *.a
