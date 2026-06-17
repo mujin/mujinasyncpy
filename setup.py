@@ -16,6 +16,7 @@ setup(
     packages=['mujinasync'],
     typestubs=['mujinasync'],
     package_dir={'mujinasync': 'python/mujinasync'},
+    package_data={'mujinasync': ['py.typed']},
     locale_dir='locale',
     license='Apache License, Version 2.0',
     long_description=open('README.md').read(),
