@@ -14,6 +14,7 @@ setup(
     name='mujinasync',
     version=version['__version__'],
     packages=['mujinasync'],
+    typestubs=['mujinasync'],
     package_dir={'mujinasync': 'python/mujinasync'},
     package_data={'mujinasync': ['py.typed']},
     locale_dir='locale',
@@ -24,4 +25,3 @@ setup(
     fail_on_flake=True,  # Fail builds when checks fail
     install_requires=[],
 )
-
