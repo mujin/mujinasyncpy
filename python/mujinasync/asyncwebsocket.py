@@ -120,43 +120,45 @@ class WebSocketServer(HttpServer):
         frameOpcode = None
         framePayload = None
 
-        bufferHead = connection.receiveBuffer.readView
+        # Read the frames straight out of the receive buffer without materializing the entire buffer
+        receiveBuffer = connection.receiveBuffer
+        bufferSize = receiveBuffer.size
         bufferConsumed = 0
         while True:
-            if len(bufferHead) < 2:
+            if bufferSize - bufferConsumed < 2:
                 return None
 
-            fin = bufferHead[0] & 0x80
-            opcode = WebSocketOpcode(bufferHead[0] & 0x0F)
-            masked = bufferHead[1] & 0x80
-            length = bufferHead[1] & 0x7F
-            bufferHead = bufferHead[2:]
+            frameHeader = receiveBuffer.PeekBytes(2, offset=bufferConsumed)
+            fin = frameHeader[0] & 0x80
+            opcode = WebSocketOpcode(frameHeader[0] & 0x0F)
+            masked = frameHeader[1] & 0x80
+            length = frameHeader[1] & 0x7F
             bufferConsumed += 2
 
             # get length
             if length == 0x7E:
-                if len(bufferHead) < 2:
+                if bufferSize - bufferConsumed < 2:
                     return None
-                length, bufferHead = struct.unpack('>H', bufferHead[:2])[0], bufferHead[2:]
+                length = struct.unpack('>H', receiveBuffer.PeekBytes(2, offset=bufferConsumed))[0]
                 bufferConsumed += 2
             elif length == 0x7F:
-                if len(bufferHead) < 8:
+                if bufferSize - bufferConsumed < 8:
                     return None
-                length, bufferHead = struct.unpack('>Q', bufferHead[:8])[0], bufferHead[8:]
+                length = struct.unpack('>Q', receiveBuffer.PeekBytes(8, offset=bufferConsumed))[0]
                 bufferConsumed += 8
 
             # get mask
             mask = None
             if masked:
-                if len(bufferHead) < 4:
+                if bufferSize - bufferConsumed < 4:
                     return None
-                mask, bufferHead = bufferHead[:4], bufferHead[4:]
+                mask = receiveBuffer.PeekBytes(4, offset=bufferConsumed)
                 bufferConsumed += 4
 
             # need entire payload
-            if len(bufferHead) < length:
+            if bufferSize - bufferConsumed < length:
                 return None
-            payload, bufferHead = bufferHead[:length], bufferHead[length:]
+            payload = receiveBuffer.PeekBytes(length, offset=bufferConsumed)
             bufferConsumed += length
 
             # unmask the payload
@@ -177,7 +179,7 @@ class WebSocketServer(HttpServer):
 
             # for last frame
             if fin:
-                connection.receiveBuffer.size -= bufferConsumed
+                receiveBuffer.size -= bufferConsumed
                 return frameOpcode, framePayload
 
     def _SendWebSocketFrame(self, connection, frameOpcode, framePayload=None):
