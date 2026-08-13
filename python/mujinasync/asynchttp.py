@@ -119,16 +119,16 @@ class HttpServer(TcpServer):
             connection.hasPendingWork = False
             return request
 
-        bufferData = connection.receiveBuffer.readView.tobytes()
-        if b'\r\n\r\n' not in bufferData:
-            if len(bufferData) > 10240:
+        # Peek the receive buffer to see if we've accumulated the full http header yet
+        receiveBuffer = connection.receiveBuffer
+        headerEnd = receiveBuffer.Find(b'\r\n\r\n')
+        if headerEnd < 0:
+            if receiveBuffer.size > 10240:
                 connection.closeType = 'Immediate'
             return None
+        bufferConsumed = headerEnd + len(b'\r\n\r\n')
 
-        header = bufferData.split(b'\r\n\r\n', 1)[0]
-        bufferConsumed = len(header) + len(b'\r\n\r\n')
-
-        lines = header.decode('utf-8').split('\r\n')
+        lines = receiveBuffer.PeekBytes(headerEnd).decode('utf-8').split('\r\n')
         parts = lines[0].split()
         if len(parts) != 3:
             log.error('failed to parse http request line %s: %s', connection, lines[0])
@@ -144,9 +144,9 @@ class HttpServer(TcpServer):
         body = None
         if 'content-length' in headers:
             length = int(headers['content-length'])
-            if len(bufferData) < length + bufferConsumed:
+            if receiveBuffer.size < length + bufferConsumed:
                 return None
-            body = bytearray(bufferData[bufferConsumed:bufferConsumed + length])
+            body = receiveBuffer.PeekBytes(length, offset=bufferConsumed)
             bufferConsumed += length
 
         request = HttpRequest()
@@ -156,7 +156,7 @@ class HttpServer(TcpServer):
         request.headers = headers
         request.body = body
 
-        connection.receiveBuffer.size -= bufferConsumed
+        receiveBuffer.size -= bufferConsumed
         return request
 
     def _SendHttpResponse(self, connection, request, response):
@@ -236,16 +236,16 @@ class HttpClient(TcpClient):
         return self._CallApi('HandleHttpResponse', response=response, connection=connection, client=self)
 
     def _TryReceiveHttpResponse(self, connection):
-        bufferData = connection.receiveBuffer.readView.tobytes()
-        if b'\r\n\r\n' not in bufferData:
-            if len(bufferData) > 10240:
+        # Peek the receive buffer to see if we've accumulated the full http header yet
+        receiveBuffer = connection.receiveBuffer
+        headerEnd = receiveBuffer.Find(b'\r\n\r\n')
+        if headerEnd < 0:
+            if receiveBuffer.size > 10240:
                 connection.closeType = 'Immediate'
             return None
+        bufferConsumed = headerEnd + len(b'\r\n\r\n')
 
-        header = bufferData.split(b'\r\n\r\n', 1)[0]
-        bufferConsumed = len(header) + len(b'\r\n\r\n')
-
-        lines = header.decode('utf-8').split('\r\n')
+        lines = receiveBuffer.PeekBytes(headerEnd).decode('utf-8').split('\r\n')
         parts = lines[0].split()
         if len(parts) < 2:
             log.error('failed to parse http response line %s: %s', connection, lines[0])
@@ -263,9 +263,9 @@ class HttpClient(TcpClient):
         body = None
         if 'content-length' in headers:
             length = int(headers['content-length'])
-            if len(bufferData) < length + bufferConsumed:
+            if receiveBuffer.size < length + bufferConsumed:
                 return None
-            body = bytearray(bufferData[bufferConsumed:bufferConsumed + length])
+            body = receiveBuffer.PeekBytes(length, offset=bufferConsumed)
             bufferConsumed += length
 
         request = self._inflightRequests[connection].pop(0)
@@ -274,7 +274,7 @@ class HttpClient(TcpClient):
         response.body = body
         request.response = response
 
-        connection.receiveBuffer.size -= bufferConsumed
+        receiveBuffer.size -= bufferConsumed
         if headers.get('connection', '') == 'close':
             connection.closeType = 'Immediate'
         return response
