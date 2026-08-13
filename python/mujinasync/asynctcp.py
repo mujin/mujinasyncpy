@@ -279,7 +279,7 @@ class TcpConnection(object):
     connectionSocket: Optional[socket.socket] # accepted socket object
     remoteAddress: tuple[str, int] # remote address
     closeType: Optional[Union[Literal['AfterSend'], Literal['Immediate']]] = None # Immediate, AfterSend
-    sendBuffer: TcpBuffer # buffer to hold data waiting to be sent
+    sendBuffer: TcpSendBuffer # buffer to hold data waiting to be sent
     receiveBuffer: TcpBuffer # buffer to hold data received before consumption
     hasPendingWork: bool = False # should this socket be submitted as a 'readable' socket even if no new data is received?
 
