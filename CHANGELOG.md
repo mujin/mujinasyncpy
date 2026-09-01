@@ -13,6 +13,11 @@
   both buffers without joining them. `Find` only joins them when what it is looking for is not in
   the buffer being read, since an occurrence can straddle the boundary.
 
+### Fixes
+
+- Fix `size` not dropping data that is staged behind an empty read buffer, which made the buffer
+  hold data that could never be consumed.
+
 ### Changes
 
 - (BREAKING) `TcpConnection.sendBuffer` is now a `TcpSendBuffer`, whose `readView` only exposes the
