@@ -70,8 +70,8 @@ class TcpBuffer(object):
     def _SwapBuffers(self) -> None:
         """Start reading the staged data, keeping the buffer that was just read for staging
         """
-        if self._stagingEnd > 0 and self._stagingData is not None:
-            self._readData, self._stagingData = self._stagingData, self._readData
+        if self._stagingEnd > 0:
+            self._readData, self._stagingData = self._GetStagingData(), self._readData
             self._readEnd = self._stagingEnd
             self._stagingEnd = 0
         else:
@@ -107,7 +107,9 @@ class TcpBuffer(object):
     def _Consume(self, count: int) -> None:
         """Drop count bytes from the front of the data, once they have been read
         """
-        while count > 0 and self._readOffset < self._readEnd:
+        # loop on the total size rather than the buffer being read, so that data that is staged
+        # behind an empty read buffer is still dropped
+        while count > 0 and self.size > 0:
             readSize = self._readEnd - self._readOffset
             if count < readSize:
                 self._readOffset += count

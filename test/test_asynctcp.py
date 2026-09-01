@@ -929,6 +929,17 @@ class TestTcpBuffer:
 
         assert bytes(buffer.readView) == b"data", "Rejected reads should change nothing"
 
+    def test_ConsumeDropsStagedDataBehindAnEmptyBuffer(self) -> None:
+        """Test consuming data that is staged behind a read buffer with no room in it"""
+        buffer = TcpBuffer()
+        buffer.capacity = 0
+        QueueData(buffer, b"staged")
+        assert buffer.size == len(b"staged")
+
+        buffer.size -= len(b"staged")
+        assert buffer.size == 0, "Staged data should be dropped even with nothing to read in front"
+        assert len(buffer.readView) == 0
+
 
 class TestHttp:
     def _MakeServer(self, api: RecordingHttpApi, port: int):
