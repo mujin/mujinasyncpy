@@ -11,14 +11,13 @@ from typing import Any, Literal, Optional, Type, Union, Callable
 
 log = logging.getLogger(__name__)
 
-TcpServerClient = Union["TcpServer", "TcpClient"]
+TcpServerClient = Union['TcpServer', 'TcpClient']
 
 _defaultBufferCapacity = 64 * 1024  # capacity in bytes that buffers are created with
 
 
 class TcpBuffer(object):
-    """
-    Buffer object to manage socket receive and send
+    """Buffer object to manage socket receive and send
 
     To avoid shuffling data around inside of buffers, use a double-buffered implementation.
     Incoming and outgoing data are each their own buffer, swapped as necessary, with simple pointers to track read/write offsets.
@@ -26,20 +25,11 @@ class TcpBuffer(object):
     readView has to join the buffers to present a contiguous block of memory.
     """
 
-    # Buffer that data is being read out of
-    _readData: bytearray
-
-    # Offset in _readData of the first byte that has not been read yet
-    _readOffset: int
-
-    # Offset in _readData one past the last byte of valid data
-    _readEnd: int
-
-    # Buffer that new data accumulates in when it cannot go into _readData, allocated on first use
-    _stagingData: Optional[bytearray]
-
-    # offset in _stagingData one past the last byte of valid data
-    _stagingEnd: int
+    _readData: bytearray # buffer that data is being read out of
+    _readOffset: int # offset in _readData of the first byte that has not been read yet
+    _readEnd: int # offset in _readData one past the last byte of valid data
+    _stagingData: Optional[bytearray] # buffer that new data accumulates in when it cannot go into _readData, allocated on first use
+    _stagingEnd: int # offset in _stagingData one past the last byte of valid data
 
     def __init__(self):
         self._readData = bytearray(_defaultBufferCapacity)
@@ -49,28 +39,29 @@ class TcpBuffer(object):
         self._stagingEnd = 0
 
     def _CanAppendToReadData(self) -> bool:
-        """
-        Can we still append new data to the current read buffer?
+        """Can we still append new data to the current read buffer?
+
         Always forcing new writes to buffer while the read buffer is non-full would split data more than necessary.
         """
         return self._readEnd < len(self._readData)
 
     @property
     def _isStaging(self) -> bool:
-        """Whether new data accumulates in the staging buffer instead of the buffer being read"""
+        """Whether new data accumulates in the staging buffer instead of the buffer being read
+        """
         # data that is already staged has to stay ahead of anything appended after it
         return self._stagingEnd > 0 or not self._CanAppendToReadData()
 
     def _GetStagingData(self) -> bytearray:
-        """
-        Return the staging buffer, allocating it the first time data has to be staged.
+        """Return the staging buffer, allocating it the first time data has to be staged
         """
         if self._stagingData is None:
             self._stagingData = bytearray(_defaultBufferCapacity)
         return self._stagingData
 
     def _SwapBuffers(self) -> None:
-        """Start reading the staged data, keeping the buffer that was just read for staging"""
+        """Start reading the staged data, keeping the buffer that was just read for staging
+        """
         if self._stagingData is not None:
             self._readData, self._stagingData = self._stagingData, self._readData
             self._readEnd = self._stagingEnd
@@ -80,28 +71,30 @@ class TcpBuffer(object):
         self._readOffset = 0
 
     def _JoinBuffers(self) -> None:
-        """Move the staged data in behind the data being read, so that all of the data is contiguous"""
+        """Move the staged data in behind the data being read, so that all of the data is contiguous
+        """
         stagingData = self._GetStagingData()
         readSize = self._readEnd - self._readOffset
         size = readSize + self._stagingEnd
 
         # If all of the data fits in the existing buffer, we can just drop what's already been read
         if size <= len(self._readData):
-            self._readData[:readSize] = self._readData[self._readOffset : self._readEnd]
+            self._readData[:readSize] = self._readData[self._readOffset:self._readEnd]
 
-        # If if doesn't, we need to expand the buffer. Do a standard geometric growth pattern.
+        # If it doesn't, we need to expand the buffer. Do a standard geometric growth pattern.
         else:
             data = bytearray(max(2 * len(self._readData), size))
-            data[:readSize] = self._readData[self._readOffset : self._readEnd]
+            data[:readSize] = self._readData[self._readOffset:self._readEnd]
             self._readData = data
 
-        self._readData[readSize:size] = stagingData[: self._stagingEnd]
+        self._readData[readSize:size] = stagingData[:self._stagingEnd]
         self._readOffset = 0
         self._readEnd = size
         self._stagingEnd = 0
 
     def _Consume(self, count: int) -> None:
-        """Drop count bytes from the front of the data, once they have been read"""
+        """Drop count bytes from the front of the data, once they have been read
+        """
         while count > 0 and self._readOffset < self._readEnd:
             readSize = self._readEnd - self._readOffset
             if count < readSize:
@@ -113,28 +106,27 @@ class TcpBuffer(object):
 
     @property
     def writeView(self):
-        """
-        Return a memory view safe for writing into the buffer.
+        """Return a memory view safe for writing into buffer
+
         Each write call must re-acquire the write view in case the buffer got swapped.
         """
         if self._isStaging:
-            return memoryview(self._GetStagingData())[self._stagingEnd :]
-        return memoryview(self._readData)[self._readEnd :]
+            return memoryview(self._GetStagingData())[self._stagingEnd:]
+        return memoryview(self._readData)[self._readEnd:]
 
     @property
     def readView(self):
-        """
-        Return a memory view safe for reading from the buffer.
+        """Return a memory view safe for reading from buffer
+
         Covers all data in the buffer, so any data backed up into the staging area must be moved first.
         Use Find and PeekBytes to avoid this consolidation.
         """
         if self._stagingEnd > 0:
             self._JoinBuffers()
-        return memoryview(self._readData)[self._readOffset : self._readEnd]
+        return memoryview(self._readData)[self._readOffset:self._readEnd]
 
     def Find(self, data: bytes, start: int = 0) -> int:
-        """
-        Return the offset in the buffer of the first occurrence of data, or -1 if not found.
+        """Return the offset in the buffer of the first occurrence of data, or -1 if not found
 
         :param data: byte sequence to look for
         :param start: offset in the buffer to start looking from
@@ -156,8 +148,7 @@ class TcpBuffer(object):
         return index - self._readOffset
 
     def PeekBytes(self, count: int, offset: int = 0) -> bytearray:
-        """
-        Return a copy of count bytes of the buffer at offset, without consuming them.
+        """Return a copy of count bytes of the buffer at offset, without consuming them
 
         :param count: number of bytes to copy out of the buffer
         :param offset: offset in the buffer of the first byte to copy out
@@ -167,20 +158,21 @@ class TcpBuffer(object):
         readSize = self._readEnd - self._readOffset
         if offset + count <= readSize:
             start = self._readOffset + offset
-            return self._readData[start : start + count]
+            return self._readData[start:start + count]
         stagingData = self._GetStagingData()
         if offset >= readSize:
             start = offset - readSize
-            return stagingData[start : start + count]
+            return stagingData[start:start + count]
 
         # The requested data straddles the two buffers, take the part that is in each
-        data = self._readData[self._readOffset + offset : self._readEnd]
-        data += stagingData[: count - len(data)]
+        data = self._readData[self._readOffset + offset:self._readEnd]
+        data += stagingData[:count - len(data)]
         return data
 
     @property
     def size(self):
-        """Length in bytes of valid data in buffer"""
+        """Length in bytes of valid data in buffer
+        """
         return (self._readEnd - self._readOffset) + self._stagingEnd
 
     @size.setter
@@ -207,8 +199,7 @@ class TcpBuffer(object):
 
     @property
     def capacity(self):
-        """
-        Total capacity of buffer in bytes.
+        """Total capacity of buffer in bytes
 
         Counts the data still to be read plus the room of the buffer taking new data,
         so that capacity minus size is always how many bytes writeView can accept.
@@ -227,14 +218,14 @@ class TcpBuffer(object):
         if not self._isStaging:
             readSize = self._readEnd - self._readOffset
             data = bytearray(capacity)
-            data[:readSize] = self._readData[self._readOffset : self._readEnd]
+            data[:readSize] = self._readData[self._readOffset:self._readEnd]
             self._readData = data
             self._readOffset = 0
             self._readEnd = readSize
             return
 
         # If we're mid-read, we can't grow that buffer, we have to grow the staging buffer.
-        # Requested capacity includes the data still to be read, so only apply the remainer to the staging buffer.
+        # Requested capacity includes the data still to be read, so only apply the remainder to the staging buffer.
         stagingData = self._GetStagingData()
         stagingCapacity = capacity - (self._readEnd - self._readOffset)
         if stagingCapacity <= len(stagingData):
@@ -244,13 +235,12 @@ class TcpBuffer(object):
         # Otherwise, repeated increases with a large front buffer will dramatically increase the back buffer.
         stagingCapacity = min(stagingCapacity, 2 * len(stagingData))
         data = bytearray(stagingCapacity)
-        data[: self._stagingEnd] = stagingData[: self._stagingEnd]
+        data[:self._stagingEnd] = stagingData[:self._stagingEnd]
         self._stagingData = data
 
 
 class TcpSendBuffer(TcpBuffer):
-    """
-    Buffer object to manage socket send.
+    """Buffer object to manage socket send
 
     Data that has started being sent must not move, since the socket is only ever handed a part of it at a time,
     so unlike TcpBuffer no data is appended to the buffer being sent once any of it has reached the socket.
@@ -263,12 +253,12 @@ class TcpSendBuffer(TcpBuffer):
 
     @property
     def readView(self):
-        """
-        Return a memory view of the data that can be sent right now.
-        Only covers the front buffer - staged data becomes readable once this buffer has been fully drained.
+        """Return a memory view of the data that can be sent right now
+
+        Only covers the front buffer, staged data becomes readable once this buffer has been fully drained.
         This avoids moving data around within buffers, instead we just toggle to the other buffer when ready.
         """
-        return memoryview(self._readData)[self._readOffset : self._readEnd]
+        return memoryview(self._readData)[self._readOffset:self._readEnd]
 
 
 class TcpConnection(object):

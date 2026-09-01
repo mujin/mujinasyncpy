@@ -199,7 +199,7 @@ class WebSocketServer(HttpServer):
         while connection.sendBuffer.size + len(data) > connection.sendBuffer.capacity:
             connection.sendBuffer.capacity *= 2
 
-        connection.sendBuffer.writeView[: len(data)] = data
+        connection.sendBuffer.writeView[:len(data)] = data
         connection.sendBuffer.size += len(data)
 
     def _HandleHttpRequest(self, connection, request):
