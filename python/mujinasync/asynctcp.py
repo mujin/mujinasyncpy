@@ -52,6 +52,14 @@ class TcpBuffer(object):
         # data that is already staged has to stay ahead of anything appended after it
         return self._stagingEnd > 0 or not self._CanAppendToReadData()
 
+    @property
+    def _stagingCapacity(self) -> int:
+        """Size in bytes the staging buffer has, or would have once it is allocated
+        """
+        if self._stagingData is None:
+            return _defaultBufferCapacity
+        return len(self._stagingData)
+
     def _GetStagingData(self) -> bytearray:
         """Return the staging buffer, allocating it the first time data has to be staged
         """
@@ -62,11 +70,15 @@ class TcpBuffer(object):
     def _SwapBuffers(self) -> None:
         """Start reading the staged data, keeping the buffer that was just read for staging
         """
-        if self._stagingData is not None:
+        if self._stagingEnd > 0 and self._stagingData is not None:
             self._readData, self._stagingData = self._stagingData, self._readData
             self._readEnd = self._stagingEnd
             self._stagingEnd = 0
         else:
+            # nothing was staged, so both buffers are empty now. keep the larger one for reading, so
+            # that a buffer that has grown large is reused instead of regrown on the next large write
+            if self._stagingData is not None and len(self._stagingData) > len(self._readData):
+                self._readData, self._stagingData = self._stagingData, self._readData
             self._readEnd = 0
         self._readOffset = 0
 
@@ -205,7 +217,7 @@ class TcpBuffer(object):
         so that capacity minus size is always how many bytes writeView can accept.
         """
         if self._isStaging:
-            return (self._readEnd - self._readOffset) + len(self._GetStagingData())
+            return (self._readEnd - self._readOffset) + self._stagingCapacity
         return len(self._readData) - self._readOffset
 
     @capacity.setter

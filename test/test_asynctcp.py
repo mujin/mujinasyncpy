@@ -748,6 +748,51 @@ class TestTcpSendBuffer:
             "Capacity should account for the room left for new data"
         )
 
+    def test_CapacityGrowsUntilItFits(self) -> None:
+        """Test that repeated capacity assignments reach a requested capacity mid send"""
+        sendBuffer = TcpSendBuffer()
+        QueueData(sendBuffer, b"p" * 1024)
+        sendBuffer.size -= 1
+
+        wanted = sendBuffer.size + 4 * 1024 * 1024
+        assert sendBuffer.capacity < wanted
+        assert sendBuffer._stagingData is None, "Reading capacity should not allocate a buffer"
+
+        for _ in range(64):
+            if sendBuffer.capacity >= wanted:
+                break
+            sendBuffer.capacity *= 2
+        assert sendBuffer.capacity >= wanted, (
+            "Assigning capacity repeatedly should get to the requested capacity"
+        )
+        assert len(sendBuffer.writeView) == sendBuffer.capacity - sendBuffer.size
+
+    def test_DrainedBufferIsReused(self) -> None:
+        """Test that a buffer that has grown large is reused for the next large payload"""
+        sendBuffer = TcpSendBuffer()
+        payload = b"p" * (4 * 1024 * 1024)
+
+        # send a payload with something queued behind it, so that a staging buffer gets allocated
+        QueueData(sendBuffer, payload)
+        sendBuffer.size -= 1024
+        QueueData(sendBuffer, b"trailer")
+        sendBuffer.size = 0
+        assert sendBuffer._stagingData is not None
+
+        # send another payload with nothing behind it, draining the buffer it was sent from
+        QueueData(sendBuffer, payload)
+        sendBuffer.size -= 1024
+        sendBuffer.size = 0
+
+        grownCapacity = max(len(sendBuffer._readData), len(sendBuffer._stagingData))
+        QueueData(sendBuffer, payload)
+        readCapacity = len(sendBuffer._readData)
+        stagingCapacity = len(sendBuffer._stagingData)
+        assert readCapacity + stagingCapacity <= grownCapacity + 64 * 1024, (
+            f"Holding {readCapacity} and {stagingCapacity} bytes, the drained buffer should be "
+            "reused instead of growing a second large buffer"
+        )
+
     def test_InvalidSizeAndCapacity(self) -> None:
         """Test that out of range sizes and capacities are rejected"""
         sendBuffer = TcpSendBuffer()
