@@ -222,6 +222,12 @@ class TcpBuffer(object):
 
     @capacity.setter
     def capacity(self, capacity: int):
+        """Grow the buffer towards the requested capacity
+
+        While data is staged the buffer only doubles, so one assignment can leave capacity below
+        what was asked for. Callers have to keep assigning until capacity is large enough, as in
+        `while buffer.size + len(data) > buffer.capacity: buffer.capacity *= 2`.
+        """
         # Can't resize below the held data watermark
         if capacity < self.size:
             raise IndexError
