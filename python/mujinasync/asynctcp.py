@@ -13,55 +13,272 @@ log = logging.getLogger(__name__)
 
 TcpServerClient = Union['TcpServer', 'TcpClient']
 
+_defaultBufferCapacity = 64 * 1024  # capacity in bytes that buffers are created with
+
+
 class TcpBuffer(object):
     """Buffer object to manage socket receive and send
+
+    To avoid shuffling data around inside of buffers, use a double-buffered implementation.
+    Incoming and outgoing data are each their own buffer, swapped as necessary, with simple pointers to track read/write offsets.
+    Callers should prefer the Find and PeekBytes APIs to seamlessly traverse multiple buffers,
+    readView has to join the buffers to present a contiguous block of memory.
     """
 
-    _data: bytearray
-    _size: int = 0
+    _readData: bytearray # buffer that data is being read out of
+    _readOffset: int # offset in _readData of the first byte that has not been read yet
+    _readEnd: int # offset in _readData one past the last byte of valid data
+    _stagingData: Optional[bytearray] # buffer that new data accumulates in when it cannot go into _readData, allocated on first use
+    _stagingEnd: int # offset in _stagingData one past the last byte of valid data
 
     def __init__(self):
-        self._data = bytearray(64 * 1024)
+        self._readData = bytearray(_defaultBufferCapacity)
+        self._readOffset = 0
+        self._readEnd = 0
+        self._stagingData = None
+        self._stagingEnd = 0
+
+    def _CanAppendToReadData(self) -> bool:
+        """Can we still append new data to the current read buffer?
+
+        Always forcing new writes to buffer while the read buffer is non-full would split data more than necessary.
+        """
+        return self._readEnd < len(self._readData)
+
+    @property
+    def _isStaging(self) -> bool:
+        """Whether new data accumulates in the staging buffer instead of the buffer being read
+        """
+        # data that is already staged has to stay ahead of anything appended after it
+        return self._stagingEnd > 0 or not self._CanAppendToReadData()
+
+    @property
+    def _stagingCapacity(self) -> int:
+        """Size in bytes the staging buffer has, or would have once it is allocated
+        """
+        if self._stagingData is None:
+            return _defaultBufferCapacity
+        return len(self._stagingData)
+
+    def _GetStagingData(self) -> bytearray:
+        """Return the staging buffer, allocating it the first time data has to be staged
+        """
+        if self._stagingData is None:
+            self._stagingData = bytearray(_defaultBufferCapacity)
+        return self._stagingData
+
+    def _SwapBuffers(self) -> None:
+        """Start reading the staged data, keeping the buffer that was just read for staging
+        """
+        if self._stagingEnd > 0:
+            self._readData, self._stagingData = self._GetStagingData(), self._readData
+            self._readEnd = self._stagingEnd
+            self._stagingEnd = 0
+        else:
+            # nothing was staged, so both buffers are empty now. keep the larger one for reading, so
+            # that a buffer that has grown large is reused instead of regrown on the next large write
+            if self._stagingData is not None and len(self._stagingData) > len(self._readData):
+                self._readData, self._stagingData = self._stagingData, self._readData
+            self._readEnd = 0
+        self._readOffset = 0
+
+    def _JoinBuffers(self) -> None:
+        """Move the staged data in behind the data being read, so that all of the data is contiguous
+        """
+        stagingData = self._GetStagingData()
+        readSize = self._readEnd - self._readOffset
+        size = readSize + self._stagingEnd
+
+        # If all of the data fits in the existing buffer, we can just drop what's already been read
+        if size <= len(self._readData):
+            self._readData[:readSize] = self._readData[self._readOffset:self._readEnd]
+
+        # If it doesn't, we need to expand the buffer. Do a standard geometric growth pattern.
+        else:
+            data = bytearray(max(2 * len(self._readData), size))
+            data[:readSize] = self._readData[self._readOffset:self._readEnd]
+            self._readData = data
+
+        self._readData[readSize:size] = stagingData[:self._stagingEnd]
+        self._readOffset = 0
+        self._readEnd = size
+        self._stagingEnd = 0
+
+    def _Consume(self, count: int) -> None:
+        """Drop count bytes from the front of the data, once they have been read
+        """
+        # loop on the total size rather than the buffer being read, so that data that is staged
+        # behind an empty read buffer is still dropped
+        while count > 0 and self.size > 0:
+            readSize = self._readEnd - self._readOffset
+            if count < readSize:
+                self._readOffset += count
+                return
+            # the buffer has been read in full, so whatever was staged behind it is read next
+            count -= readSize
+            self._SwapBuffers()
 
     @property
     def writeView(self):
         """Return a memory view safe for writing into buffer
+
+        Each write call must re-acquire the write view in case the buffer got swapped.
         """
-        return memoryview(self._data)[self._size:]
+        if self._isStaging:
+            return memoryview(self._GetStagingData())[self._stagingEnd:]
+        return memoryview(self._readData)[self._readEnd:]
 
     @property
     def readView(self):
         """Return a memory view safe for reading from buffer
+
+        Covers all data in the buffer, so any data backed up into the staging area must be moved first.
+        Use Find and PeekBytes to avoid this consolidation.
         """
-        return memoryview(self._data)[:self._size]
+        if self._stagingEnd > 0:
+            self._JoinBuffers()
+        return memoryview(self._readData)[self._readOffset:self._readEnd]
+
+    def Find(self, data: bytes, start: int = 0) -> int:
+        """Return the offset in the buffer of the first occurrence of data, or -1 if not found
+
+        :param data: byte sequence to look for
+        :param start: offset in the buffer to start looking from
+        """
+        if start < 0:
+            raise IndexError
+        readSize = self._readEnd - self._readOffset
+        if start < readSize:
+            index = self._readData.find(data, self._readOffset + start, self._readEnd)
+            if index >= 0:
+                return index - self._readOffset
+        if self._stagingEnd == 0:
+            return -1
+        # an occurrence can straddle the two buffers, so join them to search across the boundary
+        self._JoinBuffers()
+        index = self._readData.find(data, self._readOffset + start, self._readEnd)
+        if index < 0:
+            return -1
+        return index - self._readOffset
+
+    def PeekBytes(self, count: int, offset: int = 0) -> bytearray:
+        """Return a copy of count bytes of the buffer at offset, without consuming them
+
+        :param count: number of bytes to copy out of the buffer
+        :param offset: offset in the buffer of the first byte to copy out
+        """
+        if count < 0 or offset < 0 or offset + count > self.size:
+            raise IndexError
+        readSize = self._readEnd - self._readOffset
+        if offset + count <= readSize:
+            start = self._readOffset + offset
+            return self._readData[start:start + count]
+        stagingData = self._GetStagingData()
+        if offset >= readSize:
+            start = offset - readSize
+            return stagingData[start:start + count]
+
+        # The requested data straddles the two buffers, take the part that is in each
+        data = self._readData[self._readOffset + offset:self._readEnd]
+        data += stagingData[:count - len(data)]
+        return data
 
     @property
     def size(self):
         """Length in bytes of valid data in buffer
         """
-        return self._size
+        return (self._readEnd - self._readOffset) + self._stagingEnd
 
     @size.setter
     def size(self, size: int):
-        if size < 0 or size > len(self._data):
+        if size < 0:
             raise IndexError
-        if size < self._size:
-            self._data[:size] = self._data[self._size - size:self._size]
-        self._size = size
+
+        # If data at the front has been read, drop it.
+        # Checked before capacity so that reading doesn't have to check the staging buffer.
+        currentSize = self.size
+        if size <= currentSize:
+            self._Consume(currentSize - size)
+            return
+
+        # Can't set a size greater than actual capacity
+        if size > self.capacity:
+            raise IndexError
+
+        # Data was just written through writeView, count it in the buffer it landed in
+        if self._isStaging:
+            self._stagingEnd += size - currentSize
+        else:
+            self._readEnd += size - currentSize
 
     @property
     def capacity(self):
         """Total capacity of buffer in bytes
+
+        Counts the data still to be read plus the room of the buffer taking new data,
+        so that capacity minus size is always how many bytes writeView can accept.
         """
-        return len(self._data)
+        if self._isStaging:
+            return (self._readEnd - self._readOffset) + self._stagingCapacity
+        return len(self._readData) - self._readOffset
 
     @capacity.setter
     def capacity(self, capacity: int):
-        if capacity < self._size:
+        """Grow the buffer towards the requested capacity
+
+        While data is staged the buffer only doubles, so one assignment can leave capacity below
+        what was asked for. Callers have to keep assigning until capacity is large enough, as in
+        `while buffer.size + len(data) > buffer.capacity: buffer.capacity *= 2`.
+        """
+        # Can't resize below the held data watermark
+        if capacity < self.size:
             raise IndexError
-        data = bytearray(capacity)
-        data[:self._size] = self._data[:self._size]
-        self._data = data
+
+        # If we don't have anything staged, we can just grow the buffer
+        if not self._isStaging:
+            readSize = self._readEnd - self._readOffset
+            data = bytearray(capacity)
+            data[:readSize] = self._readData[self._readOffset:self._readEnd]
+            self._readData = data
+            self._readOffset = 0
+            self._readEnd = readSize
+            return
+
+        # If we're mid-read, we can't grow that buffer, we have to grow the staging buffer.
+        # Requested capacity includes the data still to be read, so only apply the remainder to the staging buffer.
+        stagingData = self._GetStagingData()
+        stagingCapacity = capacity - (self._readEnd - self._readOffset)
+        if stagingCapacity <= len(stagingData):
+            return
+
+        # When growing, we shouldn't use the full size of the combined buffers as a baseline for geometric growth.
+        # Otherwise, repeated increases with a large front buffer will dramatically increase the back buffer.
+        stagingCapacity = min(stagingCapacity, 2 * len(stagingData))
+        data = bytearray(stagingCapacity)
+        data[:self._stagingEnd] = stagingData[:self._stagingEnd]
+        self._stagingData = data
+
+
+class TcpSendBuffer(TcpBuffer):
+    """Buffer object to manage socket send
+
+    Data that has started being sent must not move, since the socket is only ever handed a part of it at a time,
+    so unlike TcpBuffer no data is appended to the buffer being sent once any of it has reached the socket.
+    Everything queued from then on is staged behind it, and starts being sent once the buffer being sent has been sent in full.
+    """
+
+    def _CanAppendToReadData(self) -> bool:
+        # If we haven't started sending data yet, allow more data to be buffered to the front buffer
+        return self._readOffset == 0
+
+    @property
+    def readView(self):
+        """Return a memory view of the data that can be sent right now
+
+        Only covers the front buffer, staged data becomes readable once this buffer has been fully drained.
+        This avoids moving data around within buffers, instead we just toggle to the other buffer when ready.
+        """
+        return memoryview(self._readData)[self._readOffset:self._readEnd]
 
 
 class TcpConnection(object):
@@ -72,7 +289,7 @@ class TcpConnection(object):
     connectionSocket: Optional[socket.socket] # accepted socket object
     remoteAddress: tuple[str, int] # remote address
     closeType: Optional[Union[Literal['AfterSend'], Literal['Immediate']]] = None # Immediate, AfterSend
-    sendBuffer: TcpBuffer # buffer to hold data waiting to be sent
+    sendBuffer: TcpSendBuffer # buffer to hold data waiting to be sent
     receiveBuffer: TcpBuffer # buffer to hold data received before consumption
     hasPendingWork: bool = False # should this socket be submitted as a 'readable' socket even if no new data is received?
 
@@ -80,7 +297,7 @@ class TcpConnection(object):
         self.connectionSocket = connectionSocket
         self.remoteAddress = remoteAddress
         self.closeType = None
-        self.sendBuffer = TcpBuffer()
+        self.sendBuffer = TcpSendBuffer()
         self.receiveBuffer = TcpBuffer()
         self.hasPendingWork = False
 
