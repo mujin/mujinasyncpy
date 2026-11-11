@@ -1,6 +1,8 @@
 import errno
 import socket
 import struct
+import threading
+import time
 
 import pytest
 from pytest_mock import MockerFixture
@@ -9,6 +11,7 @@ from python.mujinasync.asynchttp import (
     HttpConnection,
     HttpRequest,
     HttpResponse,
+    HttpResponseProcessing,
     HttpServer,
 )
 from python.mujinasync.asynctcp import (
@@ -80,6 +83,29 @@ class RecordingHttpApi:
 
     def HandleHttpRequest(self, request, connection, server):
         self.requests.append(request)
+        response = HttpResponse(request)
+        response.body = ("body for %s" % request.path).encode("utf-8")
+        return response
+
+
+class DeferredHttpApi:
+    """Http server api whose responses are held back until the test releases them."""
+
+    def __init__(self, waitForWake: bool) -> None:
+        self.waitForWake = waitForWake
+        self.handledPaths: list[str] = []  # every call to the handler, including retries
+        self.releasedPaths: set[str] = set()
+        self.wakeDuringHandlerPaths: set[str] = set()  # paths whose waker is woken from inside the handler
+
+    def HandleHttpRequest(self, request, connection, server):
+        self.handledPaths.append(request.path)
+        if request.path not in self.releasedPaths:
+            if request.path in self.wakeDuringHandlerPaths:
+                # stands in for work on another thread completing before the handler has returned
+                self.wakeDuringHandlerPaths.discard(request.path)
+                self.releasedPaths.add(request.path)
+                request.waker.Wake()
+            raise HttpResponseProcessing(waitForWake=self.waitForWake)
         response = HttpResponse(request)
         response.body = ("body for %s" % request.path).encode("utf-8")
         return response
@@ -1101,3 +1127,196 @@ class TestWebSocket:
 
         assert api.messages == [message]
         assert connection.receiveBuffer.size == 0
+
+
+class TestWakeup:
+    def test_WakeupInterruptsSpinFromAnotherThread(self) -> None:
+        """Test that a wakeup from another thread makes a waiting SpinOnce return right away"""
+        ctx = TcpContext()
+        timer = threading.Timer(0.05, ctx.Wakeup)
+        timer.start()
+        startTime = time.monotonic()
+        ctx.SpinOnce(timeout=5)
+        elapsed = time.monotonic() - startTime
+        timer.join()
+        assert elapsed < 2, f"SpinOnce should have been woken up, but waited {elapsed:.2f}s"
+        ctx.Destroy()
+
+    def test_WakeupsAreDrained(self) -> None:
+        """Test that a spin consumes every pending wakeup, so the next one waits for its timeout again"""
+        ctx = TcpContext()
+        for _ in range(100):
+            ctx.Wakeup()
+        ctx.SpinOnce(timeout=0)
+
+        startTime = time.monotonic()
+        ctx.SpinOnce(timeout=0.1)
+        assert time.monotonic() - startTime >= 0.09, "SpinOnce should not have returned early"
+        ctx.Destroy()
+
+    def test_WakeupAfterDestroy(self) -> None:
+        """Test that waking a destroyed context does nothing"""
+        ctx = TcpContext()
+        ctx.Destroy()
+        ctx.Wakeup()
+
+
+class TestHttpPendingWork:
+    def _ConnectServerAndClient(self, serverApi, port: int):
+        ctx = TcpContext()
+        endpoint = ("127.0.0.1", port)
+        server = HttpServer(ctx, endpoint, api=serverApi)
+        clientApi = RecordingHttpResponseApi()
+        client = HttpClient(ctx, endpoint, api=clientApi)
+        for _ in range(MAX_RETRY_ATTEMPTS):
+            ctx.SpinOnce(timeout=TIMEOUT)
+            if client._connections and server._connections:
+                break
+        assert client._connections and server._connections, "Client should have connected"
+        return ctx, server, client, clientApi
+
+    def _SendRequest(self, client: HttpClient, path: str) -> None:
+        request = HttpRequest()
+        request.path = path
+        request.headers = {"Connection": "keep-alive"}
+        client.SendHttpRequest(request)
+
+    def _SpinUntil(self, ctx: TcpContext, condition, timeout: float = TIMEOUT) -> bool:
+        for _ in range(MAX_RETRY_ATTEMPTS):
+            ctx.SpinOnce(timeout=timeout)
+            if condition():
+                return True
+        return condition()
+
+    def test_PollingRequestIsRetriedEverySpin(self) -> None:
+        """Test that a request that does not wait for a wake is submitted again on every spin"""
+        serverApi = DeferredHttpApi(waitForWake=False)
+        ctx, server, client, clientApi = self._ConnectServerAndClient(serverApi, 12367)
+
+        self._SendRequest(client, "/slow")
+        assert self._SpinUntil(ctx, lambda: serverApi.handledPaths)
+        handledCount = len(serverApi.handledPaths)
+        for _ in range(5):
+            ctx.SpinOnce(timeout=TIMEOUT)
+        assert len(serverApi.handledPaths) == handledCount + 5, "Request should be retried once per spin"
+
+        serverApi.releasedPaths.add("/slow")
+        assert self._SpinUntil(ctx, lambda: clientApi.responses)
+        assert bytes(clientApi.responses[0].body) == b"body for /slow"
+
+        client.Destroy()
+        server.Destroy()
+
+    def test_ParkedRequestRunsOnlyWhenWoken(self) -> None:
+        """Test that a request waiting for a wake is not retried until it is woken from another thread"""
+        serverApi = DeferredHttpApi(waitForWake=True)
+        ctx, server, client, clientApi = self._ConnectServerAndClient(serverApi, 12368)
+
+        self._SendRequest(client, "/slow")
+        assert self._SpinUntil(ctx, lambda: serverApi.handledPaths)
+        for _ in range(5):
+            ctx.SpinOnce(timeout=TIMEOUT)
+        assert serverApi.handledPaths == ["/slow"], "Parked request should not be retried"
+
+        connection = server._connections[0]
+        waker = connection.pendingRequest.waker
+
+        def CompleteWork() -> None:
+            serverApi.releasedPaths.add("/slow")
+            waker.Wake()
+
+        timer = threading.Timer(0.05, CompleteWork)
+        timer.start()
+        startTime = time.monotonic()
+        ctx.SpinOnce(timeout=5)
+        elapsed = time.monotonic() - startTime
+        timer.join()
+        assert elapsed < 2, f"Wake should have interrupted SpinOnce, but it waited {elapsed:.2f}s"
+        assert serverApi.handledPaths == ["/slow", "/slow"], "Woken request should be retried once"
+
+        assert self._SpinUntil(ctx, lambda: clientApi.responses)
+        assert bytes(clientApi.responses[0].body) == b"body for /slow"
+        assert not connection.hasPendingWork
+        assert connection.pendingWorkWaker is None
+
+        client.Destroy()
+        server.Destroy()
+
+    def test_WakeDuringHandlerIsNotLost(self) -> None:
+        """Test that a wake arriving before the handler has raised still gets the request retried"""
+        serverApi = DeferredHttpApi(waitForWake=True)
+        serverApi.wakeDuringHandlerPaths.add("/fast")
+        ctx, server, client, clientApi = self._ConnectServerAndClient(serverApi, 12369)
+
+        self._SendRequest(client, "/fast")
+        assert self._SpinUntil(ctx, lambda: clientApi.responses)
+        assert serverApi.handledPaths == ["/fast", "/fast"]
+        assert bytes(clientApi.responses[0].body) == b"body for /fast"
+
+        client.Destroy()
+        server.Destroy()
+
+    def test_ParkedRequestIsNotRetriedOnNewData(self) -> None:
+        """Test that requests received behind a parked request stay buffered until it completes"""
+        serverApi = DeferredHttpApi(waitForWake=True)
+        server, connection = TestHttp()._MakeServer(serverApi, 12370)  # type: ignore[arg-type]
+
+        QueueData(connection.receiveBuffer, MakeHttpRequestData("/first", b"first body"))
+        server._HandleTcpReceive(connection)
+        assert serverApi.handledPaths == ["/first"]
+
+        QueueData(connection.receiveBuffer, MakeHttpRequestData("/second", b"second body"))
+        server._HandleTcpReceive(connection)
+        assert serverApi.handledPaths == ["/first"], "New data should not retry the parked request"
+        assert connection.receiveBuffer.size > 0, "The next request should stay buffered"
+
+        serverApi.releasedPaths.update(["/first", "/second"])
+        connection.pendingRequest.waker.Wake()
+        assert connection.isPendingWorkReady
+        server._HandleTcpReceive(connection)
+        assert serverApi.handledPaths == ["/first", "/first", "/second"], "Responses should stay in order"
+        assert connection.receiveBuffer.size == 0
+        assert not connection.hasPendingWork
+
+    def test_StaleWakeDoesNotRetryLaterRequest(self) -> None:
+        """Test that waking the waker of a completed request does not resubmit the next parked request"""
+        serverApi = DeferredHttpApi(waitForWake=True)
+        server, connection = TestHttp()._MakeServer(serverApi, 12371)  # type: ignore[arg-type]
+
+        QueueData(connection.receiveBuffer, MakeHttpRequestData("/first", b"first body"))
+        server._HandleTcpReceive(connection)
+        firstWaker = connection.pendingRequest.waker
+        serverApi.releasedPaths.add("/first")
+        firstWaker.Wake()
+        server._HandleTcpReceive(connection)
+        assert not connection.hasPendingWork
+
+        QueueData(connection.receiveBuffer, MakeHttpRequestData("/second", b"second body"))
+        server._HandleTcpReceive(connection)
+        assert connection.pendingRequest.path == "/second"
+
+        firstWaker.Wake()
+        assert not connection.isPendingWorkReady, "A stale wake should not resubmit the second request"
+        server._HandleTcpReceive(connection)
+        assert serverApi.handledPaths == ["/first", "/first", "/second"]
+
+    def test_PendingWorkRunsOncePerSpinWhenDataArrives(self) -> None:
+        """Test that a connection with pending work that also receives data is only handled once per spin"""
+        serverApi = DeferredHttpApi(waitForWake=False)
+        ctx, server, client, clientApi = self._ConnectServerAndClient(serverApi, 12372)
+
+        self._SendRequest(client, "/slow")
+        assert self._SpinUntil(ctx, lambda: serverApi.handledPaths)
+        handledCount = len(serverApi.handledPaths)
+
+        # push raw bytes from the client so that the server receives data while its request is pending
+        clientConnection = client._connections[0]
+        QueueData(clientConnection.sendBuffer, b"partial")
+        ctx.SpinOnce(timeout=TIMEOUT)  # client sends
+        assert server._connections[0].receiveBuffer.size == 0
+        ctx.SpinOnce(timeout=TIMEOUT)  # server receives while its request is pending
+        assert server._connections[0].receiveBuffer.size == len(b"partial"), "Server should have received data"
+        assert len(serverApi.handledPaths) == handledCount + 2, "Request should be retried exactly once per spin"
+
+        client.Destroy()
+        server.Destroy()
