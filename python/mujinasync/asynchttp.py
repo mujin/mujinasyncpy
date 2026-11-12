@@ -19,6 +19,8 @@ class HttpResponseProcessing(Exception):
     # By default, the stashed request is submitted to HandleHttpRequest again on every spin.
     # If waitForWake is True, the request will only be re-run after request.waker has been woken.
     # This allows async work to re-trigger the handler only after it has actually made progress.
+    # Nothing re-runs a parked request otherwise, and later requests on the connection wait behind it,
+    # so the async work must call request.waker.Wake() when it finishes, including when it fails.
     # Handlers should still tolerate being called again without progress having been made.
     waitForWake: bool
 
@@ -47,7 +49,7 @@ class HttpRequest(object):
     # Any information necessary to track the progress of the request can be stored here
     userState: Optional[Any] = None
 
-    # Set by HttpServer on every request it receives.
+    # Set by HttpServer on every request it receives while it is registered with a TcpContext.
     # Waking it causes the server to re-submit the request to HandleHttpRequest, see HttpResponseProcessing
     waker: Optional[PendingWorkWaker] = None
 
