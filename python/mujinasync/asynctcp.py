@@ -5,6 +5,7 @@ import select
 import selectors
 import socket
 import ssl
+import threading
 
 import logging
 from typing import Any, Literal, Optional, Type, Union, Callable
@@ -566,12 +567,14 @@ class TcpContext(object):
     # Any byte written to the send socket makes the receive socket readable, which wakes the selector.
     _wakeupReceiveSocket: Optional[socket.socket]
     _wakeupSendSocket: Optional[socket.socket]
+    _wakeupSendLock: threading.Lock # held while sending to or closing the send socket, so a send never hits a reused fd
 
     # Logging function to use for verbose messages.
     # If the log facility allows for it, this will be log.verbose. If not, we will fall back to log.debug.
     _verboseLog: Callable[..., None]
 
     def __init__(self):
+        self._wakeupSendLock = threading.Lock()
         self._servers = []
         self._clients = []
         self._selector = selectors.DefaultSelector()
@@ -602,11 +605,13 @@ class TcpContext(object):
         if self._selector is not None:
             self._selector.close()
             self._selector = None
-        for wakeupSocket in (self._wakeupReceiveSocket, self._wakeupSendSocket):
-            if wakeupSocket is not None:
-                wakeupSocket.close()
-        self._wakeupReceiveSocket = None
-        self._wakeupSendSocket = None
+        if self._wakeupReceiveSocket is not None:
+            self._wakeupReceiveSocket.close()
+            self._wakeupReceiveSocket = None
+        with self._wakeupSendLock:
+            if self._wakeupSendSocket is not None:
+                self._wakeupSendSocket.close()
+                self._wakeupSendSocket = None
         self._servers = []
 
     def Wakeup(self) -> None:
@@ -614,22 +619,21 @@ class TcpContext(object):
         If SpinOnce call is currently waiting on sockets, wake it. If it isn't, the next call will wake immediately.
         Safe to call from any thread.
         """
-        # Read the attribute once, since Destroy can clear it from another thread.
-        wakeupSendSocket = self._wakeupSendSocket
-        if wakeupSendSocket is None:
-            return
+        with self._wakeupSendLock:
+            # Destroy may already have run on another thread
+            if self._wakeupSendSocket is None:
+                return
 
-        # Write to the socket so that the select in SpinOnce sees activity
-        try:
-            wakeupSendSocket.send(b'\x00')
+            # Write to the socket so that the select in SpinOnce sees activity
+            try:
+                self._wakeupSendSocket.send(b'\x00')
 
-        # If there's already data on the socket, the wakeup event is already pending.
-        except BlockingIOError:
-            pass
+            # If there's already data on the socket, the wakeup event is already pending.
+            except BlockingIOError:
+                pass
 
-        # If the socket is destroyed, there's nothing left to wake
-        except OSError as e:
-            self._verboseLog('failed to wake up context: %s', e)
+            except OSError as e:
+                self._verboseLog('failed to wake up context: %s', e)
 
     def _DrainWakeupSocket(self) -> None:
         """Consume every pending wakeup, so that the next select only returns early for a new one."""
