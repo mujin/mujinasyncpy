@@ -1207,6 +1207,21 @@ class TestHttpPendingWork:
         client.Destroy()
         server.Destroy()
 
+    def test_PollingRequestDoesNotSkipTheWait(self) -> None:
+        """Test that a request that does not wait for a wake still lets SpinOnce wait for its timeout"""
+        serverApi = DeferredHttpApi(waitForWake=False)
+        ctx, server, client, clientApi = self._ConnectServerAndClient(serverApi, 12373)
+
+        self._SendRequest(client, "/slow")
+        assert self._SpinUntil(ctx, lambda: serverApi.handledPaths)
+        startTime = time.monotonic()
+        ctx.SpinOnce(timeout=0.1)
+        elapsed = time.monotonic() - startTime
+        assert elapsed >= 0.09, f"SpinOnce should have waited for its timeout, but returned after {elapsed:.3f}s"
+
+        client.Destroy()
+        server.Destroy()
+
     def test_ParkedRequestRunsOnlyWhenWoken(self) -> None:
         """Test that a request waiting for a wake is not retried until it is woken from another thread"""
         serverApi = DeferredHttpApi(waitForWake=True)
