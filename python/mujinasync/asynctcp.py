@@ -577,11 +577,16 @@ class TcpContext(object):
         self._selector = selectors.DefaultSelector()
         self._registeredSocketMaskBySocket = {}
 
-        # Use a socket pair instead of e.g. eventfd so that we're cross-platform
+        # Use a socket pair instead of e.g. eventfd so that we're cross-platform.
+        # Set to None first so that Destroy works if __init__ fails part way.
+        self._wakeupReceiveSocket = None
+        self._wakeupSendSocket = None
         self._wakeupReceiveSocket, self._wakeupSendSocket = socket.socketpair()
         self._wakeupReceiveSocket.setblocking(False)
         self._wakeupSendSocket.setblocking(False)
-        self._RegisterSocket(self._wakeupReceiveSocket, selectors.EVENT_READ)
+        # Register directly rather than through _RegisterSocket, which only logs a failure: Wakeup cannot work without it
+        self._selector.register(self._wakeupReceiveSocket, selectors.EVENT_READ, data=self._wakeupReceiveSocket)
+        self._registeredSocketMaskBySocket[self._wakeupReceiveSocket] = selectors.EVENT_READ
 
         # If our logger has a verbose option, cache it to take advantage of more log levels.
         # If it doesn't, any logs that _would_ be verbose are bumped to debug.
