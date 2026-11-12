@@ -747,8 +747,7 @@ class TcpContext(object):
 
                 # If a parked connection has been woken, short-circuit the wait.
                 # Polling connections (no waker) keep waiting, otherwise they would turn the loop into a busy spin.
-                waker = connection.pendingWorkWaker
-                if connection.hasPendingWork and waker is not None and waker.isWoken:
+                if connection.pendingWorkWaker is not None and connection.isPendingWorkReady:
                     timeout = 0
 
         # wait for events

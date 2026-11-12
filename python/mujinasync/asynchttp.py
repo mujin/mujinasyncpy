@@ -15,13 +15,9 @@ class HttpResponseProcessing(Exception):
     # connection should not block for a response.
     # If this is thrown, then the active request will be stashed on the connection and the http server will
     # continue processing any other active requests.
-    #
-    # By default, the stashed request is submitted to HandleHttpRequest again on every spin.
-    # If waitForWake is True, the request will only be re-run after request.waker has been woken.
-    # This allows async work to re-trigger the handler only after it has actually made progress.
-    # Nothing re-runs a parked request otherwise, and later requests on the connection wait behind it,
-    # so the async work must call request.waker.Wake() when it finishes, including when it fails.
-    # Handlers should still tolerate being called again without progress having been made.
+    # With waitForWake, it is resubmitted only once request.waker is woken instead of on every spin, and later requests
+    # on the connection wait behind it, so the async work must call Wake() when it finishes or fails.
+    # Handlers must still tolerate being resubmitted without progress.
     waitForWake: bool
 
     def __init__(self, *args: Any, waitForWake: bool = False):
