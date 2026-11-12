@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 (2026-11-11)
+
+### Features
+
+- Add `TcpContext.Wakeup`, which can be called from any thread to make a waiting `SpinOnce` return right away.
+- Let non-blocking http handlers tell the event loop when they have made progress.
+  Every request received by `HttpServer` carries a `PendingWorkWaker` as `request.waker`.
+  A handler that raises `HttpResponseProcessing(waitForWake=True)` has its request parked until `request.waker.Wake()` is called,
+  rather than having it submitted again on every spin.
+  Raising `HttpResponseProcessing()` without it keeps submitting the request on every spin.
+
+### Fixes
+
+- Fix connections with pending work that also received data being handled twice in one spin.
+
 ## 0.2.0 (2026-08-13)
 
 ### Features

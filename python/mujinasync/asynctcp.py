@@ -5,6 +5,7 @@ import select
 import selectors
 import socket
 import ssl
+import threading
 
 import logging
 from typing import Any, Literal, Optional, Type, Union, Callable
@@ -281,6 +282,45 @@ class TcpSendBuffer(TcpBuffer):
         return memoryview(self._readData)[self._readOffset:self._readEnd]
 
 
+class PendingWorkWaker(object):
+    """
+    Handle that lets work running outside of the event loop, such as on another thread, tell the event loop that
+    the pending work it belongs to has made progress and should be run again.
+
+    Wake is the only method that is safe to call from other threads.
+    """
+
+    # Context whose SpinOnce is interrupted on wake
+    _ctx: 'TcpContext'
+
+    # Set from any thread on wake, cleared by the event loop when it runs the pending work again
+    _isWoken: bool
+
+    def __init__(self, ctx: 'TcpContext'):
+        self._ctx = ctx
+        self._isWoken = False
+
+    @property
+    def isWoken(self) -> bool:
+        return self._isWoken
+
+    def Wake(self) -> None:
+        """
+        Mark the pending work as ready to run again, and interrupt the event loop if it is waiting on sockets.
+        Safe to call from any thread, any number of times. Waking after the work has completed only costs an extra spin.
+        """
+        # The flag has to be set before the event loop is woken, so that the spin the wakeup triggers sees it.
+        self._isWoken = True
+        self._ctx.Wakeup()
+
+    def _Reset(self) -> None:
+        """
+        Called by the event loop right before it runs the pending work again.
+        A wake that arrives while that run is in progress stays set, so progress made during the run is not lost.
+        """
+        self._isWoken = False
+
+
 class TcpConnection(object):
     """
     Accepted TCP connection.
@@ -293,6 +333,9 @@ class TcpConnection(object):
     receiveBuffer: TcpBuffer # buffer to hold data received before consumption
     hasPendingWork: bool = False # should this socket be submitted as a 'readable' socket even if no new data is received?
 
+    # When set, pending work is only run again once this waker has been woken, rather than on every spin.
+    pendingWorkWaker: Optional[PendingWorkWaker] = None
+
     def __init__(self, connectionSocket: socket.socket, remoteAddress: tuple[str, int]):
         self.connectionSocket = connectionSocket
         self.remoteAddress = remoteAddress
@@ -300,6 +343,15 @@ class TcpConnection(object):
         self.sendBuffer = TcpSendBuffer()
         self.receiveBuffer = TcpBuffer()
         self.hasPendingWork = False
+        self.pendingWorkWaker = None
+
+    @property
+    def isPendingWorkReady(self) -> bool:
+        """Whether there is pending work that the event loop should run on this spin."""
+        if not self.hasPendingWork:
+            return False
+        waker = self.pendingWorkWaker
+        return waker is None or waker.isWoken
 
     def __repr__(self):
         return '<%s(%s)>' % (self.__class__.__name__, ', '.join([
@@ -511,15 +563,33 @@ class TcpContext(object):
     _selector: Optional[selectors.DefaultSelector] # selector, on Debian it will be EpollSelector
     _registeredSocketMaskBySocket: dict[socket.socket, int] # dict of socket -> socketMask(int)
 
+    # Socket pair used to interrupt select from other threads.
+    # Any byte written to the send socket makes the receive socket readable, which wakes the selector.
+    _wakeupReceiveSocket: Optional[socket.socket]
+    _wakeupSendSocket: Optional[socket.socket]
+    _wakeupSendLock: threading.Lock # held while sending to or closing the send socket, so a send never hits a reused fd
+
     # Logging function to use for verbose messages.
     # If the log facility allows for it, this will be log.verbose. If not, we will fall back to log.debug.
     _verboseLog: Callable[..., None]
 
     def __init__(self):
+        self._wakeupSendLock = threading.Lock()
         self._servers = []
         self._clients = []
         self._selector = selectors.DefaultSelector()
         self._registeredSocketMaskBySocket = {}
+
+        # Use a socket pair instead of e.g. eventfd so that we're cross-platform.
+        # Set to None first so that Destroy works if __init__ fails part way.
+        self._wakeupReceiveSocket = None
+        self._wakeupSendSocket = None
+        self._wakeupReceiveSocket, self._wakeupSendSocket = socket.socketpair()
+        self._wakeupReceiveSocket.setblocking(False)
+        self._wakeupSendSocket.setblocking(False)
+        # Register directly rather than through _RegisterSocket, which only logs a failure: Wakeup cannot work without it
+        self._selector.register(self._wakeupReceiveSocket, selectors.EVENT_READ, data=self._wakeupReceiveSocket)
+        self._registeredSocketMaskBySocket[self._wakeupReceiveSocket] = selectors.EVENT_READ
 
         # If our logger has a verbose option, cache it to take advantage of more log levels.
         # If it doesn't, any logs that _would_ be verbose are bumped to debug.
@@ -535,7 +605,45 @@ class TcpContext(object):
         if self._selector is not None:
             self._selector.close()
             self._selector = None
+        if self._wakeupReceiveSocket is not None:
+            self._wakeupReceiveSocket.close()
+            self._wakeupReceiveSocket = None
+        with self._wakeupSendLock:
+            if self._wakeupSendSocket is not None:
+                self._wakeupSendSocket.close()
+                self._wakeupSendSocket = None
         self._servers = []
+
+    def Wakeup(self) -> None:
+        """
+        If SpinOnce call is currently waiting on sockets, wake it. If it isn't, the next call will wake immediately.
+        Safe to call from any thread.
+        """
+        with self._wakeupSendLock:
+            # Destroy may already have run on another thread
+            if self._wakeupSendSocket is None:
+                return
+
+            # Write to the socket so that the select in SpinOnce sees activity
+            try:
+                self._wakeupSendSocket.send(b'\x00')
+
+            # If there's already data on the socket, the wakeup event is already pending.
+            except BlockingIOError:
+                pass
+
+            except OSError as e:
+                self._verboseLog('failed to wake up context: %s', e)
+
+    def _DrainWakeupSocket(self) -> None:
+        """Consume every pending wakeup, so that the next select only returns early for a new one."""
+        assert self._wakeupReceiveSocket
+        while True:
+            try:
+                if not self._wakeupReceiveSocket.recv(4096):
+                    return
+            except BlockingIOError:
+                return
 
     def RegisterServer(self, server: TcpServer):
         if server not in self._servers:
@@ -641,6 +749,11 @@ class TcpContext(object):
                 self._RegisterSocket(sock, mask)
                 socketConnections[sock] = (serverClient, connection)
 
+                # If a parked connection has been woken, short-circuit the wait.
+                # Polling connections (no waker) keep waiting, otherwise they would turn the loop into a busy spin.
+                if connection.pendingWorkWaker is not None and connection.isPendingWorkReady:
+                    timeout = 0
+
         # wait for events
         while True:
             try:
@@ -663,6 +776,11 @@ class TcpContext(object):
         # handle sockets that can read
         receivedConnections: list[tuple[TcpServerClient, TcpConnection]] = [] # list of tuple (serverClient, connection)
         for rsocket in rlist:
+            # If we had data on our wakeup socket, drain it before looping again.
+            if rsocket is self._wakeupReceiveSocket:
+                self._DrainWakeupSocket()
+                continue
+
             server = tcpServersBySocket.get(rsocket)
             if server is not None:
                 try:
@@ -736,10 +854,12 @@ class TcpContext(object):
             self._verboseLog('closing connection from %s on endpoint %s', connection.remoteAddress, serverClient._endpoint)
             serverClient._CloseConnection(connection)
 
-        # Handle server sockets that are processing non-blocking work
+        # Handle server sockets that are processing non-blocking work.
+        # Skip any that also received data this spin, since we will have already spun them once.
+        alreadyReceivedConnections = set(connection for _, connection in receivedConnections)
         for server in self._servers:
             for connection in server._connections:
-                if connection.hasPendingWork:
+                if connection.isPendingWorkReady and connection not in alreadyReceivedConnections:
                     receivedConnections.append((server, connection))
 
         # let user code run at the very end

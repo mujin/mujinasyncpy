@@ -15,15 +15,15 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: [3.9]
+        python-version: [3.13.5]
+
+    # Run inside the official Python image, since setup-python only ships prebuilt
+    # interpreters for specific runner OS versions and may not cover the pinned version.
+    container:
+      image: python:${{ matrix.python-version }}
 
     steps:
-    - uses: actions/checkout@v2
-
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
-      with:
-        python-version: ${{ matrix.python-version }}
+    - uses: actions/checkout@v4
 
     - name: Install dependencies
       run: |

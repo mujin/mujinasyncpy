@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional, Any
 
-from .asynctcp import TcpServer, TcpConnection, TcpClient
+from .asynctcp import TcpServer, TcpConnection, TcpClient, PendingWorkWaker
 
 import logging
 log = logging.getLogger(__name__)
@@ -14,8 +14,15 @@ class HttpResponseProcessing(Exception):
     # request, but are not yet ready to return the response (e.g, calling a slow external resource), and the
     # connection should not block for a response.
     # If this is thrown, then the active request will be stashed on the connection and the http server will
-    # continue processing any other active requests
-    pass
+    # continue processing any other active requests.
+    # With waitForWake, it is resubmitted only once request.waker is woken instead of on every spin, and later requests
+    # on the connection wait behind it, so the async work must call Wake() when it finishes or fails.
+    # Handlers must still tolerate being resubmitted without progress.
+    waitForWake: bool
+
+    def __init__(self, *args: Any, waitForWake: bool = False):
+        super().__init__(*args)
+        self.waitForWake = waitForWake
 
 
 class HttpConnection(TcpConnection):
@@ -37,6 +44,10 @@ class HttpRequest(object):
     # For user programs that make use of non-blocking handlers
     # Any information necessary to track the progress of the request can be stored here
     userState: Optional[Any] = None
+
+    # Set by HttpServer on every request it receives while it is registered with a TcpContext.
+    # Waking it causes the server to re-submit the request to HandleHttpRequest, see HttpResponseProcessing
+    waker: Optional[PendingWorkWaker] = None
 
     def __repr__(self):
         return '<%s(%s)>' % (self.__class__.__name__, ', '.join([
@@ -92,12 +103,13 @@ class HttpServer(TcpServer):
         response = None
         try:
             response = self._HandleHttpRequest(connection, request)
-        except HttpResponseProcessing:
+        except HttpResponseProcessing as e:
             # if the current request would block, then cache it and re-submit it next loop to check if it is complete.
             # send no response on the connection here - the request is still processing
             connection.pendingRequest = request
             connection.hasPendingWork = True
-            return
+            connection.pendingWorkWaker = request.waker if e.waitForWake else None
+            return False
         except Exception as e:
             log.exception('caught exception while handling http request %r: %s', request, e)
 
@@ -114,9 +126,22 @@ class HttpServer(TcpServer):
     def _TryReceiveHttpRequest(self, connection):
         # If this connection already has a pending request, pop it off and return it
         if connection.pendingRequest:
+            # Data arriving on the connection does not mean the request has made progress.
+            # If we're parked and waiting for a wakeup, stay parked.
+            # Requests received behind it stay buffered to keep responses in order.
+            if not connection.isPendingWorkReady:
+                return None
+
             request = connection.pendingRequest
             connection.pendingRequest = None
             connection.hasPendingWork = False
+            connection.pendingWorkWaker = None
+
+            # If we had a wake object, reset it before running the handler.
+            # This way, any wakeups triggered _during_ the handler are still latched and cause a re-spin.
+            if request.waker is not None:
+                request.waker._Reset()
+
             return request
 
         # Peek the receive buffer to see if we've accumulated the full http header yet
@@ -155,6 +180,10 @@ class HttpServer(TcpServer):
         request.httpVersion = httpVersion.upper()
         request.headers = headers
         request.body = body
+
+        # Don't re-use wakers across requests so that late wakeups for a finished requests can't spuriously wake a new one.
+        if self._ctx is not None:
+            request.waker = PendingWorkWaker(self._ctx)
 
         receiveBuffer.size -= bufferConsumed
         return request
