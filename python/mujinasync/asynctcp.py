@@ -853,10 +853,10 @@ class TcpContext(object):
 
         # Handle server sockets that are processing non-blocking work.
         # Skip any that also received data this spin, since we will have already spun them once.
-        alreadyReceivedConnectionIds = set(id(connection) for _, connection in receivedConnections)
+        alreadyReceivedConnections = set(connection for _, connection in receivedConnections)
         for server in self._servers:
             for connection in server._connections:
-                if connection.isPendingWorkReady and id(connection) not in alreadyReceivedConnectionIds:
+                if connection.isPendingWorkReady and connection not in alreadyReceivedConnections:
                     receivedConnections.append((server, connection))
 
         # let user code run at the very end
