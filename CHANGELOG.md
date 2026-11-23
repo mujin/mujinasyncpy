@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Log a peer disconnecting during send or receive (`EPIPE`, `ECONNRESET`) at debug level without a traceback, rather than as an error.
+
 ## 0.3.0 (2026-11-11)
 
 ### Features

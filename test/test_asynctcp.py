@@ -1,4 +1,5 @@
 import errno
+import logging
 import socket
 import struct
 import threading
@@ -317,6 +318,85 @@ class TestAsyncTcp:
             assert serverConnection.closeType is None
 
             assert mockSocketRecv.call_count >= 2
+
+        server.Destroy()
+        client.Destroy()
+
+    def _ConnectServerAndClient(self, ctx: TcpContext, endpoint: tuple[str, int]) -> tuple[TcpServer, TcpClient]:
+        server = TcpServer(ctx, endpoint)
+        server._EnsureServerSocket()
+        client = TcpClient(ctx, endpoint)
+        for _ in range(MAX_RETRY_ATTEMPTS):
+            ctx.SpinOnce(timeout=TIMEOUT)
+            if len(server._connections) > 0 and len(client._connections) > 0:
+                break
+        assert server._connections and client._connections
+        return server, client
+
+    @pytest.mark.parametrize("error", [BrokenPipeError(errno.EPIPE, "Broken pipe"), ConnectionResetError(errno.ECONNRESET, "Connection reset by peer")])
+    def test_PeerDisconnectOnSendIsNotAnError(self, mocker: MockerFixture, caplog: pytest.LogCaptureFixture, error: OSError) -> None:
+        """A peer going away while sending closes the connection without logging an error"""
+        ctx = TcpContext()
+        server, client = self._ConnectServerAndClient(ctx, ("127.0.0.1", 12380))
+
+        connection = client._connections[0]
+        testData = b"Test data"
+        connection.sendBuffer.writeView[: len(testData)] = testData
+        connection.sendBuffer.size = len(testData)
+
+        mocker.patch.object(socket.socket, "send", side_effect=error)
+        with caplog.at_level(logging.DEBUG, logger="python.mujinasync.asynctcp"):
+            ctx.SpinOnce(timeout=TIMEOUT)
+
+        assert connection not in client._connections
+        assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+        assert any("peer disconnected while sending" in record.getMessage() for record in caplog.records)
+
+        server.Destroy()
+        client.Destroy()
+
+    @pytest.mark.parametrize("error", [BrokenPipeError(errno.EPIPE, "Broken pipe"), ConnectionResetError(errno.ECONNRESET, "Connection reset by peer")])
+    def test_PeerDisconnectOnRecvIsNotAnError(self, mocker: MockerFixture, caplog: pytest.LogCaptureFixture, error: OSError) -> None:
+        """A peer going away while receiving closes the connection without logging an error"""
+        ctx = TcpContext()
+        server, client = self._ConnectServerAndClient(ctx, ("127.0.0.1", 12381))
+
+        clientConnection = client._connections[0]
+        testData = b"Test data"
+        clientConnection.sendBuffer.writeView[: len(testData)] = testData
+        clientConnection.sendBuffer.size = len(testData)
+        serverConnection = server._connections[0]
+
+        mocker.patch.object(socket.socket, "recv_into", side_effect=error)
+        with caplog.at_level(logging.DEBUG, logger="python.mujinasync.asynctcp"):
+            for _ in range(MAX_RETRY_ATTEMPTS):
+                ctx.SpinOnce(timeout=TIMEOUT)
+                if serverConnection not in server._connections:
+                    break
+
+        assert serverConnection not in server._connections
+        assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+        assert any("peer disconnected while receiving" in record.getMessage() for record in caplog.records)
+
+        server.Destroy()
+        client.Destroy()
+
+    def test_OtherSendErrorsAreStillLoggedAsErrors(self, mocker: MockerFixture, caplog: pytest.LogCaptureFixture) -> None:
+        """Errors that are not the peer disconnecting still log at error level"""
+        ctx = TcpContext()
+        server, client = self._ConnectServerAndClient(ctx, ("127.0.0.1", 12382))
+
+        connection = client._connections[0]
+        testData = b"Test data"
+        connection.sendBuffer.writeView[: len(testData)] = testData
+        connection.sendBuffer.size = len(testData)
+
+        mocker.patch.object(socket.socket, "send", side_effect=OSError(errno.EBADF, "Bad file descriptor"))
+        with caplog.at_level(logging.DEBUG, logger="python.mujinasync.asynctcp"):
+            ctx.SpinOnce(timeout=TIMEOUT)
+
+        assert connection not in client._connections
+        assert any(record.levelno == logging.ERROR and "error while trying to send" in record.getMessage() for record in caplog.records)
 
         server.Destroy()
         client.Destroy()
