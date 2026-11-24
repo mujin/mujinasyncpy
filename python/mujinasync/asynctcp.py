@@ -16,6 +16,10 @@ TcpServerClient = Union['TcpServer', 'TcpClient']
 
 _defaultBufferCapacity = 64 * 1024  # capacity in bytes that buffers are created with
 
+# Errors raised when the peer has gone away.
+# This is a normal occurrence, and the connection is closed cleanly afterwards, so they are not worth a traceback.
+_peerDisconnectedErrnos = (errno.EPIPE, errno.ECONNRESET)
+
 
 class TcpBuffer(object):
     """Buffer object to manage socket receive and send
@@ -804,8 +808,12 @@ class TcpContext(object):
             try:
                 received = rsocket.recv_into(connection.receiveBuffer.writeView)
             except socket.error as e:
-                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
-                    connection.closeType = 'Immediate'
+                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    continue
+                connection.closeType = 'Immediate'
+                if e.errno in _peerDisconnectedErrnos:
+                    log.debug('peer disconnected while receiving from connection %s: %s', connection, e)
+                else:
                     log.exception('error while trying to receive from connection %s: %s', connection, e)
                 continue
             except Exception as e:
@@ -830,8 +838,12 @@ class TcpContext(object):
                 try:
                     sent = wsocket.send(connection.sendBuffer.readView)
                 except socket.error as e:
-                    if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
-                        connection.closeType = 'Immediate'
+                    if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                        continue
+                    connection.closeType = 'Immediate'
+                    if e.errno in _peerDisconnectedErrnos:
+                        log.debug('peer disconnected while sending on connection %s: %s', connection, e)
+                    else:
                         log.exception('error while trying to send on connection %s: %s', connection, e)
                     continue
                 except Exception as e:
